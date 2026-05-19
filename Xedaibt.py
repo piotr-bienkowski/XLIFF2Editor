@@ -1055,6 +1055,12 @@ class XLIFFEditor(QMainWindow):
         load_glossary_action.triggered.connect(self.browse_glossary)
         options_menu.addAction(load_glossary_action)
 
+        self.propagate_action = QAction("Propagate to Identical Segments", self)
+        self.propagate_action.setCheckable(True)
+        self.propagate_action.setChecked(self.xconfig['settings'].get('propagate_identical', True))
+        self.propagate_action.triggered.connect(self.toggle_propagate_identical)
+        options_menu.addAction(self.propagate_action)
+
         ai_toolbar = self.addToolBar("AI Provider")
         ai_toolbar.setMovable(False)
         ai_toolbar.addWidget(QLabel("  AI: "))
@@ -1123,6 +1129,7 @@ class XLIFFEditor(QMainWindow):
                 "underline_color": {"r": 57, "g": 255, "b": 20},
                 "ai_provider": "Claude",
                 "glossary_file": "",
+                "propagate_identical": True,
             },
             "recent_files": [],
             "contexts": [],
@@ -1491,6 +1498,29 @@ class XLIFFEditor(QMainWindow):
 
     def toggle_theme(self):
         self.apply_theme("light" if self.current_theme == "dark" else "dark")
+
+    def toggle_propagate_identical(self):
+        self.xconfig['settings']['propagate_identical'] = self.propagate_action.isChecked()
+        self.save_xconfig()
+
+    def _propagate_to_identical(self, source_text: str, target_text: str, skip_row: int) -> int:
+        if not self.xconfig['settings'].get('propagate_identical', True):
+            return 0
+        if not target_text:
+            return 0
+        count = 0
+        self.table.itemChanged.disconnect()
+        for r, seg in enumerate(self.segments):
+            if r == skip_row or seg.get('locked', False):
+                continue
+            if seg['source'] == source_text:
+                seg['target'] = target_text
+                item = self.table.item(r, 3)
+                if item:
+                    item.setText(target_text)
+                count += 1
+        self.table.itemChanged.connect(self.on_item_changed)
+        return count
 
     # --- Tag Handling Logic ---
 
@@ -1883,11 +1913,10 @@ class XLIFFEditor(QMainWindow):
             row = item.row()
             val = item.text()
             self.segments[row]['target'] = val
-            # Only auto-translate status if not empty
-            if val.strip():
-                # Note: We don't overwrite if it was already 'translated'
-                pass 
             self.is_modified = True
+            count = self._propagate_to_identical(self.segments[row]['source'], val, row)
+            if count:
+                self.statusBar().showMessage(f"Propagated to {count} identical segment(s).", 3000)
 
     def on_cell_changed(self, row, col, p_row, p_col):
         if row >= 0:
@@ -2435,6 +2464,9 @@ class XLIFFEditor(QMainWindow):
         self.table.item(row, 4).setText('initial')  # Column 4 is now Status
         self.table.itemChanged.connect(self.on_item_changed)
         self.is_modified = True
+        count = self._propagate_to_identical(self.segments[row]['source'], trans, row)
+        if count:
+            self.statusBar().showMessage(f"Propagated to {count} identical segment(s).", 3000)
 
     def on_ai_finished(self):
         """Handle AI translation completion"""
