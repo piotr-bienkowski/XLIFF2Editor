@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:2.0" version="2.0" srcLang="pl-PL" trgLang="en-US">
+  <file id="file1">
+    <unit id="1">
+      <segment>
+        <source>Witamy w naszej aplikacji!</source>
+        <target>Wellcome to our aplication!</target>
+      </segment>
+    </unit>
+    <unit id="2">
+      <segment>
+        <source>Proszę <pc id="1">kliknąć tutaj</pc>, aby kontynuować.</source>
+        <target>Please <pc id="1">click here</pc> to continu.</target>
+      </segment>
+    </unit>
+    <unit id="3">
+      <segment>
+        <source>Plik został zapisany pomyślnie.</source>
+        <target>The <pc id="1">file</pc> has been savd succesfully.</target>
+      </segment>
+    </unit>
+    <unit id="4">
+      <segment>
+        <source>Błąd: Nieprawidłowa nazwa użytkownika lub hasło.</source>
+        <target>Error: Invalid <pc id="1">userneme</pc> or <pc id="2">pasword</pc>.</target>
+      </segment>
+    </unit>
+    <unit id="5">
+      <segment>
+        <source>Przetwarzanie Twojego żądania...</source>
+        <target>Procesing your reqest...</target>
+      </segment>
+    </unit>
+    <unit id="6">
+      <segment>
+        <source>Dziękujemy za cierpliwość.</source>
+        <target>Thank you for your patiance.</target>
+      </segment>
+    </unit>
+    <unit id="7">
+      <segment>
+        <source>Dokument zawiera ważne informacje.</source>
+        <target>The document containz <pc id="1">importent</pc> informashun.</target>
+      </segment>
+    </unit>
+    <unit id="8">
+      <segment>
+        <source>Ustawienia zostały zaktualizowane.</source>
+        <target>Settings have been updated.</target>
+      </segment>
+    </unit>
+    <unit id="9">
+      <segment>
+        <source>Czy chcesz zapisać zmiany przed zamknięciem?</source>
+        <target>Do you want to save changez before closeing?</target>
+      </segment>
+    </unit>
+    <unit id="10">
+      <segment>
+        <source>Połączenie z serwerem nie powiodło się.</source>
+        <target>Conection to server failded.</target>
+      </segment>
+    </unit>
+  </file>
+</xliff>

@@ -1,0 +1,13 @@
+# Settings file — contains API keys, never commit
+xconfig.json
+xconfig.tmp
+
+# Editor backups
+*.backup
+*.bak
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd

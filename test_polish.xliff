@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:2.0" version="2.0" srcLang="en-US" trgLang="pl-PL">
+  <file id="file1">
+    <unit id="1">
+      <segment>
+        <source>Welcome to our application!</source>
+        <target>Witamy w naszej aplikacjii!</target>
+      </segment>
+    </unit>
+    <unit id="2">
+      <segment>
+        <source>Please <pc id="1">click here</pc> to continue.</source>
+        <target>Proszę <pc id="1">kliknąć tutaj</pc>, aby kontynuowac.</target>
+      </segment>
+    </unit>
+    <unit id="3">
+      <segment>
+        <source>The <pc id="1">file</pc> has been saved successfully.</source>
+        <target>Plik został zapisany pomyślnie.</target>
+      </segment>
+    </unit>
+    <unit id="4">
+      <segment>
+        <source>Error: Invalid <pc id="1">username</pc> or <pc id="2">password</pc>.</source>
+        <target>Błąd: Nieprawidłowa nazwa użytkownika lub hasło.</target>
+      </segment>
+    </unit>
+    <unit id="5">
+      <segment>
+        <source>Processing your request...</source>
+        <target>Przetwarzanie Twojego żądana...</target>
+      </segment>
+    </unit>
+    <unit id="6">
+      <segment>
+        <source>Thank you for your patience.</source>
+        <target>Dziękujemy za cierpliwośc.</target>
+      </segment>
+    </unit>
+    <unit id="7">
+      <segment>
+        <source>The document contains <pc id="1">important</pc> information.</source>
+        <target>Dokument zawiera ważne informacje.</target>
+      </segment>
+    </unit>
+    <unit id="8">
+      <segment>
+        <source>Settings have been updated.</source>
+        <target>Ustawienia zostały zaktualizowane.</target>
+      </segment>
+    </unit>
+    <unit id="9">
+      <segment>
+        <source>Do you want to save changes before closing?</source>
+        <target>Czy chcesz zapiszać zmiany przed zamknięciem?</target>
+      </segment>
+    </unit>
+    <unit id="10">
+      <segment>
+        <source>Connection to server failed.</source>
+        <target>Połączenie z serwerem nie powiodlo się.</target>
+      </segment>
+    </unit>
+  </file>
+</xliff>
