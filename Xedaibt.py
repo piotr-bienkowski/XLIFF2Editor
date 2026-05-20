@@ -449,29 +449,22 @@ class TagProtectedTextEdit(QPlainTextEdit):
 
                     # Add up to 5 suggestions
                     for suggestion in suggestions[:5]:
-                        action = menu.insertAction(
-                            menu.actions()[0] if menu.actions() else None,
-                            suggestion
-                        )
-                        # Connect to replacement function
+                        action = QAction(suggestion, self)
                         action.triggered.connect(
                             lambda checked, s=suggestion, st=start, en=end: self.replace_word(st, en, s)
                         )
+                        menu.insertAction(menu.actions()[0] if menu.actions() else None, action)
 
                     # Add "Add to dictionary" option
                     menu.insertSeparator(menu.actions()[0] if menu.actions() else None)
-                    add_action = menu.insertAction(
-                        menu.actions()[0] if menu.actions() else None,
-                        f"Add '{word}' to dictionary"
-                    )
+                    add_action = QAction(f"Add '{word}' to dictionary", self)
                     add_action.triggered.connect(lambda checked, w=word: self.add_to_dictionary(w))
+                    menu.insertAction(menu.actions()[0] if menu.actions() else None, add_action)
                 else:
                     # No suggestions available
-                    no_sugg_action = menu.insertAction(
-                        menu.actions()[0] if menu.actions() else None,
-                        "(No suggestions)"
-                    )
+                    no_sugg_action = QAction("(No suggestions)", self)
                     no_sugg_action.setEnabled(False)
+                    menu.insertAction(menu.actions()[0] if menu.actions() else None, no_sugg_action)
                     menu.insertSeparator(menu.actions()[1] if len(menu.actions()) > 1 else None)
 
         menu.exec(event.globalPos())
