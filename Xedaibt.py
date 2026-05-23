@@ -46,6 +46,8 @@ except ImportError:
 
 MODULE_DIR = Path(__file__).parent
 XCONFIG_PATH = MODULE_DIR / "xconfig.json"
+if str(MODULE_DIR) not in sys.path:
+    sys.path.insert(0, str(MODULE_DIR))
 
 # --- Custom Editor Widget for Tag Protection ---
 
@@ -855,7 +857,7 @@ class AITranslationThread(QThread):
         translator = deepl.Translator(self.api_key)
         src = self.src_lang.split('-')[0].upper() if self.src_lang else None
         trg = self._deepl_target_lang(self.trg_lang)
-        ignore = [f"t{i}" for i in range(1, 21)]
+        inline_tags = [f"t{i}" for i in range(1, 21)]
         total = len(self.segments_to_translate)
         for idx, (row, source_text) in enumerate(self.segments_to_translate):
             if self.is_cancelled:
@@ -867,7 +869,7 @@ class AITranslationThread(QThread):
                 source_lang=src,
                 target_lang=trg,
                 tag_handling='xml',
-                ignore_tags=ignore,
+                non_splitting_tags=inline_tags,
             )
             translation = self._from_deepl_xml(result.text.strip())
             self.segment_translated.emit(row, translation, "initial")
@@ -969,7 +971,7 @@ class XLIFFEditor(QMainWindow):
         self.update_recent_files_menu()
         
         file_menu.addSeparator()
-        
+
         # SDLXLIFF submenu
         sdlxliff_menu = file_menu.addMenu("SDLXLIFF")
         sdlxliff_actions = [
@@ -982,7 +984,20 @@ class XLIFFEditor(QMainWindow):
                 act.setShortcut(QKeySequence(shortcut))
             act.triggered.connect(callback)
             sdlxliff_menu.addAction(act)
-        
+
+        # memoQ submenu
+        mqxliff_menu = file_menu.addMenu("memoQ")
+        mqxliff_actions = [
+            ("Import from memoQ (MQXLIFF)...", None, self.import_from_mqxliff),
+            ("Export to memoQ (MQXLIFF)...", None, self.export_to_mqxliff),
+        ]
+        for name, shortcut, callback in mqxliff_actions:
+            act = QAction(name, self)
+            if shortcut:
+                act.setShortcut(QKeySequence(shortcut))
+            act.triggered.connect(callback)
+            mqxliff_menu.addAction(act)
+
         file_menu.addSeparator()
         
         # Continue with other file menu items
@@ -2627,6 +2642,117 @@ class XLIFFEditor(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Merge Error", 
                                f"Failed to merge back to SDLXLIFF:\n\n{str(e)}")
+
+    def import_from_mqxliff(self):
+        """Import memoQ MQXLIFF file(s) and convert to XLIFF 2.2"""
+        try:
+            import mqxliff_xliff22_converter as converter
+        except ImportError:
+            QMessageBox.critical(self, "Module Missing",
+                               "The mqxliff_xliff22_converter.py module is not found.\n\n"
+                               "Please ensure it's in the same directory as this editor.")
+            return
+
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select memoQ MQXLIFF File(s)",
+            "",
+            "memoQ XLIFF Files (*.mqxliff);;All Files (*)"
+        )
+        if not file_paths:
+            return
+
+        output_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Converted XLIFF 2.2 File",
+            "",
+            "XLIFF Files (*.xlf *.xliff);;All Files (*)"
+        )
+        if not output_path:
+            return
+
+        try:
+            result = converter.convert_mqxliff_to_xliff22(
+                file_paths, output_path, verbose=False
+            )
+            reply = QMessageBox.question(
+                self,
+                "Conversion Successful",
+                f"Converted {result['total_segments']} segments from {result['total_files']} file(s).\n\n"
+                f"Open the converted file now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.open_xliff_file(str(output_path))
+        except Exception as e:
+            QMessageBox.critical(self, "Conversion Error",
+                               f"Failed to convert MQXLIFF file(s):\n\n{str(e)}")
+
+    def export_to_mqxliff(self):
+        """Export current XLIFF 2.2 translations back to memoQ MQXLIFF file(s)"""
+        if not self.filepath:
+            QMessageBox.warning(self, "No File Open",
+                              "Please open an XLIFF 2.2 file first.")
+            return
+
+        try:
+            import xliff22_to_mqxliff_merger as merger
+        except ImportError:
+            QMessageBox.critical(self, "Module Missing",
+                               "The xliff22_to_mqxliff_merger.py module is not found.\n\n"
+                               "Please ensure it's in the same directory as this editor.")
+            return
+
+        if self.is_modified:
+            reply = QMessageBox.question(
+                self,
+                "Unsaved Changes",
+                "Save changes to XLIFF 2.2 file before exporting?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+            elif reply == QMessageBox.StandardButton.Yes:
+                self.save_xliff()
+
+        mqxliff_dir = QFileDialog.getExistingDirectory(
+            self, "Select Directory with Original MQXLIFF Files"
+        )
+        if not mqxliff_dir:
+            return
+
+        output_dir = QFileDialog.getExistingDirectory(
+            self, "Select Output Directory for Updated MQXLIFF Files"
+        )
+        if not output_dir:
+            return
+
+        try:
+            results = merger.batch_merge_xliff22_to_mqxliff(
+                self.filepath, mqxliff_dir, output_dir, dry_run=False
+            )
+            success_count = sum(1 for r in results if r['status'] == 'success')
+            no_match_count = sum(1 for r in results if r['status'] == 'no_match')
+            error_count = sum(1 for r in results if r['status'] == 'error')
+
+            msg = "Merge completed:\n\n"
+            msg += f"✓ Successfully merged: {success_count} file(s)\n"
+            if no_match_count:
+                msg += f"⚠ No match found: {no_match_count} file(s)\n"
+            if error_count:
+                msg += f"✗ Errors: {error_count} file(s)\n"
+            if success_count:
+                total_updated = sum(r.get('updated', 0) for r in results if r['status'] == 'success')
+                msg += f"\nTotal segments updated: {total_updated}"
+
+            if error_count or no_match_count:
+                QMessageBox.warning(self, "Merge Completed with Issues", msg)
+            else:
+                QMessageBox.information(self, "Merge Successful", msg)
+        except Exception as e:
+            QMessageBox.critical(self, "Merge Error",
+                               f"Failed to merge back to MQXLIFF:\n\n{str(e)}")
+
 
 def main():
     app = QApplication(sys.argv)

@@ -2,7 +2,7 @@
 
 ## Overview
 
-A PyQt6-based graphical XLIFF editor for professional translation workflows. Supports XLIFF 2.0, 2.1, and 2.2 files. Provides tag-aware editing, AI/MT translation via multiple providers (Claude, Gemini, OpenAI, DeepL), translation memory (TMX) support, spell checking, SDLXLIFF conversion, and automatic light/dark theme switching.
+A PyQt6-based graphical XLIFF editor for professional translation workflows. Supports XLIFF 2.0, 2.1, and 2.2 files. Provides tag-aware editing, AI/MT translation via multiple providers (Claude, Gemini, OpenAI, DeepL), translation memory (TMX) support, spell checking, SDL Trados SDLXLIFF conversion, memoQ MQXLIFF conversion, and automatic light/dark theme switching.
 
 ---
 
@@ -55,10 +55,12 @@ AI/MT translation and spell checking are optional features. Install only the pac
 
 ### Companion Modules
 
-| Module                                | Purpose                                                |
-| ------------------------------------- | ------------------------------------------------------ |
-| `sdlxliff_xliff22_converter.py`       | Converts SDLXLIFF files to XLIFF 2.2                   |
-| `xliff22_to_sdlxliff_batch_merger.py` | Merges XLIFF 2.2 translations back into SDLXLIFF files |
+| Module                                | Purpose                                                      |
+| ------------------------------------- | ------------------------------------------------------------ |
+| `sdlxliff_xliff22_converter.py`       | Converts SDL Trados SDLXLIFF files to XLIFF 2.2              |
+| `xliff22_to_sdlxliff_batch_merger.py` | Merges XLIFF 2.2 translations back into SDLXLIFF files       |
+| `mqxliff_xliff22_converter.py`        | Converts memoQ MQXLIFF files to XLIFF 2.2                    |
+| `xliff22_to_mqxliff_merger.py`        | Merges XLIFF 2.2 translations back into MQXLIFF files        |
 
 ---
 
@@ -136,12 +138,21 @@ On first launch after upgrading, the editor automatically migrates settings from
 | Close XLIFF | `Ctrl+W`       | Close current file with save prompt   |
 | Exit        | `Ctrl+Q`       | Exit application                      |
 
-### SDLXLIFF Conversion
+### SDLXLIFF Conversion (File → SDLXLIFF)
 
 | Feature              | Description                                                    |
 | -------------------- | -------------------------------------------------------------- |
 | Import from SDLXLIFF | Convert one or more SDLXLIFF files to XLIFF 2.2 format         |
 | Export to SDLXLIFF   | Merge XLIFF 2.2 translations back into original SDLXLIFF files |
+
+### memoQ Conversion (File → memoQ)
+
+| Feature                      | Description                                                      |
+| ---------------------------- | ---------------------------------------------------------------- |
+| Import from memoQ (MQXLIFF)  | Convert one or more MQXLIFF files to XLIFF 2.2 format            |
+| Export to memoQ (MQXLIFF)    | Merge XLIFF 2.2 translations back into original MQXLIFF files    |
+
+The memoQ converter handles XLIFF 1.2 files with the `MQXliff` namespace extension as exported by memoQ. Inline tags (`bpt`/`ept` flat pairs, `g`, `ph`, `x`) are converted to XLIFF 2.2 `pc`/`ph` elements for editing and converted back on export. The `mq:status` attribute is mapped to/from XLIFF 2.2 `state` using the values defined in `MQXliffSchema-4-0-21.xsd`.
 
 ### Translation Memory (TMX)
 
@@ -280,6 +291,7 @@ The custom editor (`TagProtectedTextEdit`) provides:
 ### Via Converter Modules
 
 - **SDLXLIFF** (.sdlxliff) — SDL Trados format (import/export)
+- **MQXLIFF** (.mqxliff) — memoQ format (import/export)
 
 ---
 
@@ -318,6 +330,30 @@ The custom editor (`TagProtectedTextEdit`) provides:
 | reviewed        | ApprovedTranslation |
 | final           | ApprovedSignOff     |
 | needs-review-*  | RejectedTranslation |
+
+### memoQ → XLIFF 2.2
+
+| memoQ status             | XLIFF 2.2 state |
+| ------------------------ | --------------- |
+| NotStarted               | initial         |
+| PreTranslated            | translated      |
+| PartiallyEdited          | translated      |
+| ManuallyConfirmed        | final           |
+| AssembledFromFragments   | translated      |
+| AutoJoined               | translated      |
+| AutoSplit                | initial         |
+| AutoSplitAndEmpty        | initial         |
+| Ackknowledged *(schema)* | reviewed        |
+
+### XLIFF 2.2 → memoQ
+
+| XLIFF 2.2 state  | memoQ status      |
+| ---------------- | ----------------- |
+| initial          | NotStarted        |
+| translated       | PartiallyEdited   |
+| reviewed         | Ackknowledged     |
+| final            | ManuallyConfirmed |
+| needs-review-*   | PartiallyEdited   |
 
 ---
 
@@ -365,3 +401,45 @@ python xliff22_to_sdlxliff_batch_merger.py merged.xlf \
     --sdlxliff-dir ./originals \
     --output-dir ./updated
 ```
+
+---
+
+## Converter Module: mqxliff_xliff22_converter.py
+
+Converts memoQ MQXLIFF (XLIFF 1.2 + `MQXliff` namespace) files to XLIFF 2.2 format.
+
+```bash
+python mqxliff_xliff22_converter.py input.mqxliff -o output.xlf
+python mqxliff_xliff22_converter.py *.mqxliff -o merged.xlf
+```
+
+### Using the converter from your own script
+
+```python
+from XLIFF2Editor.mqxliff_xliff22_converter import convert_mqxliff_to_xliff22
+from pathlib import Path
+
+stats = convert_mqxliff_to_xliff22(
+    input_paths=["project.mqxliff"],
+    output_path="project.xlf",
+)
+print(f"Converted {stats['total_segments']} segments from {stats['total_files']} file(s).")
+```
+
+### Inline tag handling
+
+memoQ uses `bpt`/`ept` as flat siblings (not nested) to mark paired codes such as bold or italic. The converter collects the tail text of `bpt` and all content until the matching `ept` and wraps it in an XLIFF 2.2 `pc` element. `g` elements are converted to `pc` directly; `ph`, `x`, and `it` become `ph`. On export back to MQXLIFF, `pc` is written as `g` and `ph` as `x`.
+
+---
+
+## Converter Module: xliff22_to_mqxliff_merger.py
+
+Merges XLIFF 2.2 translations back into original MQXLIFF files.
+
+```bash
+python xliff22_to_mqxliff_merger.py merged.xlf \
+    --mqxliff-dir ./originals \
+    --output-dir ./updated
+```
+
+File matching uses exact filename lookup (the file ID in XLIFF 2.2 is set to the original MQXLIFF filename), with case-insensitive fallback. Updated files are written to `--output-dir`; originals are not modified.
