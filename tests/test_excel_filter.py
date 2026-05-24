@@ -113,3 +113,91 @@ def test_segmenter_returns_list_of_strings(segmenter):
     result = segmenter.segment("Hello. World.", "en-US")
     assert isinstance(result, list)
     assert all(isinstance(r, str) for r in result)
+
+
+# ── excel_xliff22_converter tests ────────────────────────────────────────────
+
+from excel_xliff22_converter import convert_excel_to_xliff22
+
+
+def _out_xliff():
+    tmp = tempfile.NamedTemporaryFile(suffix='.xliff', delete=False)
+    tmp.close()
+    _TEMP_FILES.append(tmp.name)
+    return Path(tmp.name)
+
+
+def test_converter_basic():
+    excel = _make_excel(['Hello world.', 'How are you?'])
+    out = _out_xliff()
+    result = convert_excel_to_xliff22(excel, out, 'en-US', 'pl-PL', 'A', 'B', 2, False)
+    assert result['total_rows'] == 2
+    assert result['total_units'] == 2
+
+    tree = etree.parse(str(out))
+    root = tree.getroot()
+    units = root.findall(f'.//{{{NS22}}}unit')
+    assert len(units) == 2
+    assert units[0].get('x-excel-row') == '2'
+    assert units[1].get('x-excel-row') == '3'
+    sources = root.findall(f'.//{{{NS22}}}source')
+    assert sources[0].text == 'Hello world.'
+    assert sources[1].text == 'How are you?'
+    targets = root.findall(f'.//{{{NS22}}}target')
+    assert all(t.text is None for t in targets)
+
+
+def test_converter_skips_empty_source():
+    excel = _make_excel(['Hello.', None, 'World.'])
+    out = _out_xliff()
+    result = convert_excel_to_xliff22(excel, out, 'en-US', 'pl-PL', 'A', 'B', 2, False)
+    assert result['total_rows'] == 2
+    assert result['total_units'] == 2
+
+
+def test_converter_file_metadata():
+    excel = _make_excel(['Hello.'])
+    out = _out_xliff()
+    convert_excel_to_xliff22(excel, out, 'en-US', 'pl-PL', 'A', 'B', 2, False)
+    tree = etree.parse(str(out))
+    root = tree.getroot()
+    assert root.get('srcLang') == 'en-US'
+    assert root.get('trgLang') == 'pl-PL'
+    file_elem = root.find(f'{{{NS22}}}file')
+    assert file_elem.get('x-excel-src-col') == 'A'
+    assert file_elem.get('x-excel-tgt-col') == 'B'
+
+
+def test_converter_segmentation_splits_units():
+    excel = _make_excel(['First sentence. Second sentence.'])
+    out = _out_xliff()
+    result = convert_excel_to_xliff22(
+        excel, out, 'en-US', 'pl-PL', 'A', 'B', 2, True,
+        srx_path=SRX_PATH
+    )
+    assert result['total_rows'] == 1
+    assert result['total_units'] == 2
+    tree = etree.parse(str(out))
+    units = tree.getroot().findall(f'.//{{{NS22}}}unit')
+    assert len(units) == 2
+    # both units refer to the same Excel row
+    assert units[0].get('x-excel-row') == '2'
+    assert units[1].get('x-excel-row') == '2'
+
+
+def test_converter_column_b():
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws['B2'] = 'Source in B'
+    import tempfile as _tmp
+    t = _tmp.NamedTemporaryFile(suffix='.xlsx', delete=False)
+    wb.save(t.name)
+    t.close()
+    _TEMP_FILES.append(t.name)
+    out = _out_xliff()
+    result = convert_excel_to_xliff22(t.name, out, 'en-US', 'pl-PL', 'B', 'C', 2, False)
+    assert result['total_rows'] == 1
+    tree = etree.parse(str(out))
+    src = tree.getroot().find(f'.//{{{NS22}}}source')
+    assert src.text == 'Source in B'
