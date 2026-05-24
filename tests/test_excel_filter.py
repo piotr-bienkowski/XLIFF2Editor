@@ -4,11 +4,21 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import tempfile
 import pytest
-from openpyxl import Workbook, load_workbook
+from openpyxl import Workbook, load_workbook  # noqa: F401  (load_workbook used in Task 4)
 from lxml import etree
 
 NS22 = 'urn:oasis:names:tc:xliff:document:2.0'
 SRX_PATH = Path(__file__).parent.parent / 'segment.srx'
+_TEMP_FILES: list = []
+
+
+def teardown_module(_module):
+    import os
+    for p in _TEMP_FILES:
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -24,6 +34,7 @@ def _make_excel(rows, first_row=2):
     tmp = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False)
     wb.save(tmp.name)
     tmp.close()
+    _TEMP_FILES.append(tmp.name)
     return Path(tmp.name)
 
 
@@ -52,6 +63,7 @@ def _make_xliff(units, tgt_col='B'):
     tmp = tempfile.NamedTemporaryFile(suffix='.xliff', delete=False)
     tree.write(tmp.name, xml_declaration=True, encoding='UTF-8', pretty_print=True)
     tmp.close()
+    _TEMP_FILES.append(tmp.name)
     return Path(tmp.name)
 
 
