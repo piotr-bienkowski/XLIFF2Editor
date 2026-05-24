@@ -72,46 +72,44 @@ def _make_xliff(units, tgt_col='B'):
 from srx_segmenter import SrxSegmenter
 
 
-def test_segmenter_english_two_sentences():
-    s = SrxSegmenter(SRX_PATH)
-    result = s.segment("Hello world. How are you?", "en-US")
+@pytest.fixture(scope='module')
+def segmenter():
+    return SrxSegmenter(SRX_PATH)
+
+
+def test_segmenter_english_two_sentences(segmenter):
+    result = segmenter.segment("Hello world. How are you?", "en-US")
     assert len(result) == 2
     assert result[0] == "Hello world."
     assert result[1] == "How are you?"
 
 
-def test_segmenter_three_sentences():
-    s = SrxSegmenter(SRX_PATH)
-    result = s.segment("First sentence. Second sentence. Third sentence.", "en-US")
+def test_segmenter_three_sentences(segmenter):
+    result = segmenter.segment("First sentence. Second sentence. Third sentence.", "en-US")
     assert len(result) == 3
 
 
-def test_segmenter_single_sentence_no_split():
-    s = SrxSegmenter(SRX_PATH)
-    result = s.segment("Hello world", "en-US")
+def test_segmenter_single_sentence_no_split(segmenter):
+    result = segmenter.segment("Hello world", "en-US")
     assert result == ["Hello world"]
 
 
-def test_segmenter_empty_text():
-    s = SrxSegmenter(SRX_PATH)
-    assert s.segment("", "en-US") == []
+def test_segmenter_empty_text(segmenter):
+    assert segmenter.segment("", "en-US") == []
 
 
-def test_segmenter_whitespace_only():
-    s = SrxSegmenter(SRX_PATH)
-    result = s.segment("   ", "en-US")
+def test_segmenter_whitespace_only(segmenter):
+    result = segmenter.segment("   ", "en-US")
     assert result == ["   "]
 
 
-def test_segmenter_polish_abbreviation_no_split():
+def test_segmenter_polish_abbreviation_no_split(segmenter):
     # "adw." (adwokat) is a Polish abbreviation — should not split
-    s = SrxSegmenter(SRX_PATH)
-    result = s.segment("Adw. Kowalski złożył wniosek.", "pl-PL")
+    result = segmenter.segment("Adw. Kowalski złożył wniosek.", "pl-PL")
     assert len(result) == 1
 
 
-def test_segmenter_returns_list_of_strings():
-    s = SrxSegmenter(SRX_PATH)
-    result = s.segment("Hello. World.", "en-US")
+def test_segmenter_returns_list_of_strings(segmenter):
+    result = segmenter.segment("Hello. World.", "en-US")
     assert isinstance(result, list)
     assert all(isinstance(r, str) for r in result)

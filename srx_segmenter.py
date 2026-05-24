@@ -47,6 +47,12 @@ class SrxSegmenter:
     Usage:
         segmenter = SrxSegmenter()          # uses segment.srx next to this file
         sentences = segmenter.segment(text, 'en-US')
+
+    Limitations:
+    - Always uses cascade=yes semantics (all matching language maps contribute rules).
+      SRX files with cascade="no" will silently produce incorrect results.
+    - Java-only regex flags (e.g. (?U)) cause those rules to be silently dropped.
+      This affects Russian/Ukrainian/Belarusian in segment.srx but not EN/PL.
     """
 
     def __init__(self, srx_path=None):
