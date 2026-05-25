@@ -57,11 +57,12 @@ class ExcelImportDialog(QDialog):
 
         self.src_col.textChanged.connect(self._validate_cols)
         self.tgt_col.textChanged.connect(self._validate_cols)
+        self._validate_cols()
 
     def _validate_cols(self) -> None:
         ok = bool(_COL_RE.match(self.src_col.text())) and \
              bool(_COL_RE.match(self.tgt_col.text()))
-        self._col_error.setText('' if ok else 'Invalid column (use A–Z or AA–ZZ)')
+        self._col_error.setText('' if ok else 'Invalid column (use letters only, e.g. A, B, AA)')
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(ok)
 
     def values(self) -> dict:
@@ -116,10 +117,9 @@ def convert_excel_to_xliff22(
 
     wb = load_workbook(str(input_path), read_only=True, data_only=True)
     ws = wb.active
-    max_row = ws.max_row or 0
 
     xliff_root = etree.Element(f'{{{NS22}}}xliff', nsmap={None: NS22})
-    xliff_root.set('version', '2.0')
+    xliff_root.set('version', '2.2')
     xliff_root.set('srcLang', src_lang)
     xliff_root.set('trgLang', tgt_lang)
 
@@ -130,12 +130,12 @@ def convert_excel_to_xliff22(
     file_elem.set('x-excel-tgt-col', tgt_col.upper())
 
     unit_counter = 0
-    seg_counter  = 0
     total_rows   = 0
 
-    for row_idx in range(first_row, max_row + 1):
-        cell  = ws.cell(row=row_idx, column=src_col_idx)
-        value = cell.value
+    for row_idx, row in enumerate(
+        ws.iter_rows(min_row=first_row, values_only=True), start=first_row
+    ):
+        value = row[src_col_idx - 1]  # iter_rows tuples are 0-indexed
         if value is None:
             continue
         text = str(value).strip()
@@ -147,12 +147,11 @@ def convert_excel_to_xliff22(
 
         for sentence in sentences:
             unit_counter += 1
-            seg_counter  += 1
             unit_elem = etree.SubElement(file_elem, f'{{{NS22}}}unit')
-            unit_elem.set('id',           str(unit_counter))
-            unit_elem.set('x-excel-row',  str(row_idx))
+            unit_elem.set('id',          str(unit_counter))
+            unit_elem.set('x-excel-row', str(row_idx))
             seg_elem = etree.SubElement(unit_elem, f'{{{NS22}}}segment')
-            seg_elem.set('id', str(seg_counter))
+            seg_elem.set('id', str(unit_counter))
             src_elem = etree.SubElement(seg_elem, f'{{{NS22}}}source')
             src_elem.text = sentence
             etree.SubElement(seg_elem, f'{{{NS22}}}target')
