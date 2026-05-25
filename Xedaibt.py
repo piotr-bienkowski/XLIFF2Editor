@@ -182,28 +182,18 @@ class TagProtectedTextEdit(QPlainTextEdit):
                 super().keyPressEvent(event)
                 return
             
-            # For backspace/delete, check if we're at tag boundary
+            # For backspace/delete at tag boundaries, move cursor past the tag
             if event.key() == Qt.Key.Key_Backspace:
-                if pos == tag_start:
-                    # Allow backspace at start of tag (moves cursor before tag)
-                    super().keyPressEvent(event)
-                    return
-                else:
-                    # Inside tag - jump to start
-                    cursor.setPosition(tag_start)
-                    self.setTextCursor(cursor)
-                    return
-            
+                # Jump cursor to before the tag regardless of position inside it
+                cursor.setPosition(tag_start)
+                self.setTextCursor(cursor)
+                return
+
             if event.key() == Qt.Key.Key_Delete:
-                if pos == tag_end - 1:
-                    # At end of tag - allow delete (moves cursor after tag)
-                    super().keyPressEvent(event)
-                    return
-                else:
-                    # Inside tag - jump to end
-                    cursor.setPosition(tag_end)
-                    self.setTextCursor(cursor)
-                    return
+                # Jump cursor to after the tag regardless of position inside it
+                cursor.setPosition(tag_end)
+                self.setTextCursor(cursor)
+                return
             
             # Block any other key that would modify text inside tags
             if event.text() and not event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -228,9 +218,20 @@ class TagProtectedTextEdit(QPlainTextEdit):
                     if event.key() in [Qt.Key.Key_Backspace, Qt.Key.Key_Delete] or event.text():
                         return
         
+        # Block Backspace/Delete that would eat into a tag from outside
+        if not cursor.hasSelection():
+            if event.key() == Qt.Key.Key_Backspace and pos > 0:
+                in_left, _, _ = self.is_position_in_tag(pos - 1)
+                if in_left:
+                    return
+            if event.key() == Qt.Key.Key_Delete:
+                in_right, _, _ = self.is_position_in_tag(pos)
+                if in_right:
+                    return
+
         # Normal processing
         super().keyPressEvent(event)
-        
+
         # After any edit, redetect tags
         if event.key() not in [Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down,
                                Qt.Key.Key_Home, Qt.Key.Key_End, Qt.Key.Key_PageUp, Qt.Key.Key_PageDown,
