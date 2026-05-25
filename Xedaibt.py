@@ -998,6 +998,19 @@ class XLIFFEditor(QMainWindow):
             act.triggered.connect(callback)
             mqxliff_menu.addAction(act)
 
+        # Excel submenu
+        excel_menu = file_menu.addMenu("Excel")
+        excel_actions = [
+            ("Import from Excel...", None, self.import_from_excel),
+            ("Export to Excel...",   None, self.export_to_excel),
+        ]
+        for name, shortcut, callback in excel_actions:
+            act = QAction(name, self)
+            if shortcut:
+                act.setShortcut(QKeySequence(shortcut))
+            act.triggered.connect(callback)
+            excel_menu.addAction(act)
+
         file_menu.addSeparator()
         
         # Continue with other file menu items
@@ -2752,6 +2765,138 @@ class XLIFFEditor(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Merge Error",
                                f"Failed to merge back to MQXLIFF:\n\n{str(e)}")
+
+    def import_from_excel(self):
+        """Import bilingual Excel file and convert to XLIFF 2.2"""
+        try:
+            import openpyxl  # noqa: F401
+        except ImportError:
+            QMessageBox.critical(
+                self, "Module Missing",
+                "openpyxl is not installed.\n\nInstall it with:\n  pip install openpyxl"
+            )
+            return
+
+        try:
+            import excel_xliff22_converter as converter
+            from excel_xliff22_converter import ExcelImportDialog
+        except ImportError:
+            QMessageBox.critical(
+                self, "Module Missing",
+                "excel_xliff22_converter.py is not found.\n\n"
+                "Please ensure it's in the same directory as this editor."
+            )
+            return
+
+        dialog = ExcelImportDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        params = dialog.values()
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Excel File", "",
+            "Excel Files (*.xlsx);;All Files (*)"
+        )
+        if not file_path:
+            return
+
+        output_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Converted XLIFF 2.2 File", "",
+            "XLIFF Files (*.xlf *.xliff);;All Files (*)"
+        )
+        if not output_path:
+            return
+
+        try:
+            result = converter.convert_excel_to_xliff22(
+                input_path=file_path,
+                output_path=output_path,
+                src_lang=params['src_lang'],
+                tgt_lang=params['tgt_lang'],
+                src_col=params['src_col'],
+                tgt_col=params['tgt_col'],
+                first_row=params['first_row'],
+                segment=params['segment'],
+            )
+            reply = QMessageBox.question(
+                self, "Conversion Successful",
+                f"Converted {result['total_rows']} row(s) into "
+                f"{result['total_units']} unit(s).\n\nOpen the converted file now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.open_xliff_file(str(output_path))
+        except Exception as e:
+            QMessageBox.critical(self, "Conversion Error",
+                                 f"Failed to convert Excel file:\n\n{str(e)}")
+
+    def export_to_excel(self):
+        """Export current XLIFF 2.2 translations back to Excel in-place"""
+        if not self.xliff_soup:
+            QMessageBox.warning(self, "No File Open",
+                                "Please open an XLIFF 2.2 file first.")
+            return
+
+        file_tag = self.xliff_soup.find('file')
+        if not file_tag or not file_tag.get('x-excel-tgt-col'):
+            QMessageBox.warning(
+                self, "Not an Excel XLIFF",
+                "This file was not imported from Excel.\n\n"
+                "Only XLIFF files created via Excel import can be exported back."
+            )
+            return
+
+        try:
+            import openpyxl  # noqa: F401
+        except ImportError:
+            QMessageBox.critical(
+                self, "Module Missing",
+                "openpyxl is not installed.\n\nInstall it with:\n  pip install openpyxl"
+            )
+            return
+
+        try:
+            import xliff22_to_excel_merger as merger
+        except ImportError:
+            QMessageBox.critical(
+                self, "Module Missing",
+                "xliff22_to_excel_merger.py is not found.\n\n"
+                "Please ensure it's in the same directory as this editor."
+            )
+            return
+
+        if self.is_modified:
+            reply = QMessageBox.question(
+                self, "Unsaved Changes",
+                "Save changes to XLIFF 2.2 file before exporting?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+            elif reply == QMessageBox.StandardButton.Yes:
+                self.save_xliff()
+
+        default_name = file_tag.get('original', '')
+        excel_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Target Excel File", default_name,
+            "Excel Files (*.xlsx);;All Files (*)"
+        )
+        if not excel_path:
+            return
+
+        try:
+            result = merger.merge_xliff22_to_excel(self.filepath, excel_path)
+            QMessageBox.information(
+                self, "Export Successful",
+                f"Written {result['rows_written']} row(s) to "
+                f"{Path(excel_path).name}."
+            )
+        except ValueError as e:
+            QMessageBox.warning(self, "Export Error", str(e))
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error",
+                                 f"Failed to write to Excel file:\n\n{str(e)}")
 
 
 def main():
