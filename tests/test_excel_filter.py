@@ -201,3 +201,84 @@ def test_converter_column_b():
     tree = etree.parse(str(out))
     src = tree.getroot().find(f'.//{{{NS22}}}source')
     assert src.text == 'Source in B'
+
+
+# ── xliff22_to_excel_merger tests ────────────────────────────────────────────
+
+from xliff22_to_excel_merger import merge_xliff22_to_excel
+
+
+def _make_excel_for_merge(rows):
+    """Create temp xlsx with source rows starting at row 2 (col A only)."""
+    wb = Workbook()
+    ws = wb.active
+    for i, text in enumerate(rows, start=2):
+        ws.cell(row=i, column=1, value=text)
+    tmp = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False)
+    wb.save(tmp.name)
+    tmp.close()
+    _TEMP_FILES.append(tmp.name)
+    return Path(tmp.name)
+
+
+def test_merger_basic():
+    xliff = _make_xliff([
+        (2, 'Hello world.', 'Witaj świecie.'),
+        (3, 'How are you?', 'Jak się masz?'),
+    ])
+    excel = _make_excel_for_merge(['Hello world.', 'How are you?'])
+    result = merge_xliff22_to_excel(xliff, excel)
+    assert result['rows_written'] == 2
+    wb = load_workbook(str(excel))
+    ws = wb.active
+    assert ws.cell(row=2, column=2).value == 'Witaj świecie.'
+    assert ws.cell(row=3, column=2).value == 'Jak się masz?'
+
+
+def test_merger_joins_segmented_units():
+    xliff = _make_xliff([
+        (2, 'First.', 'Pierwszy.'),
+        (2, 'Second.', 'Drugi.'),
+    ])
+    excel = _make_excel_for_merge(['First. Second.'])
+    result = merge_xliff22_to_excel(xliff, excel)
+    assert result['rows_written'] == 1
+    wb = load_workbook(str(excel))
+    ws = wb.active
+    assert ws.cell(row=2, column=2).value == 'Pierwszy. Drugi.'
+
+
+def test_merger_skips_empty_targets():
+    xliff = _make_xliff([
+        (2, 'Hello.', ''),
+        (3, 'World.', 'Świat.'),
+    ])
+    excel = _make_excel_for_merge(['Hello.', 'World.'])
+    result = merge_xliff22_to_excel(xliff, excel)
+    assert result['rows_written'] == 1
+    wb = load_workbook(str(excel))
+    ws = wb.active
+    assert ws.cell(row=2, column=2).value is None
+    assert ws.cell(row=3, column=2).value == 'Świat.'
+
+
+def test_merger_raises_on_missing_metadata():
+    root = etree.Element(f'{{{NS22}}}xliff', nsmap={None: NS22})
+    file_elem = etree.SubElement(root, f'{{{NS22}}}file')
+    file_elem.set('id', 'test.xlsx')
+    tmp = tempfile.NamedTemporaryFile(suffix='.xliff', delete=False)
+    etree.ElementTree(root).write(tmp.name)
+    tmp.close()
+    _TEMP_FILES.append(tmp.name)
+    with pytest.raises(ValueError, match='x-excel-tgt-col'):
+        merge_xliff22_to_excel(tmp.name, '/tmp/irrelevant.xlsx')
+
+
+def test_merger_row_beyond_sheet_skipped():
+    xliff = _make_xliff([
+        (2, 'Present.', 'Obecny.'),
+        (999, 'Beyond.', 'Poza.'),  # row 999, sheet only has row 2
+    ])
+    excel = _make_excel_for_merge(['Present.'])
+    result = merge_xliff22_to_excel(xliff, excel)
+    assert result['rows_written'] == 1
