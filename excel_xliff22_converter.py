@@ -18,7 +18,29 @@ from PyQt6.QtWidgets import (
 )
 
 NS22 = 'urn:oasis:names:tc:xliff:document:2.0'
-_COL_RE = re.compile(r'^[A-Za-z]{1,3}$')
+_COL_RE   = re.compile(r'^[A-Za-z]{1,3}$')
+_NL_SPLIT = re.compile(r'\r?\n(?=[A-Z])')   # \n before uppercase → segment boundary
+_NL_TAG   = re.compile(r'\r?\n')             # any remaining \n → <ph> tag
+
+
+def _build_source(ns: str, text: str, trailing_nl: bool) -> etree._Element:
+    """Build a <source> element, converting \\n to <ph equiv="\\n"/> inline codes."""
+    src = etree.Element(f'{{{ns}}}source')
+    parts = _NL_TAG.split(text)
+    src.text = parts[0]
+    ph_id = 1
+    for part in parts[1:]:
+        ph = etree.SubElement(src, f'{{{ns}}}ph')
+        ph.set('id', str(ph_id))
+        ph.set('equiv', '\n')
+        ph.tail = part
+        ph_id += 1
+    if trailing_nl:
+        ph = etree.SubElement(src, f'{{{ns}}}ph')
+        ph.set('id', str(ph_id))
+        ph.set('equiv', '\n')
+        ph.tail = ''
+    return src
 
 
 # ── import dialog ─────────────────────────────────────────────────────────────
@@ -143,17 +165,28 @@ def convert_excel_to_xliff22(
             continue
         total_rows += 1
 
-        sentences = segmenter.segment(text, src_lang) if segmenter else [text]
+        # Build (sentence, trailing_newline_tag) pairs.
+        # With segmenter: pre-split on \n+uppercase, then SRX within each part.
+        # Without segmenter: one item per row; \n still converted to <ph> tags.
+        if segmenter:
+            nl_parts = [p for p in _NL_SPLIT.split(text) if p.strip()]
+            items = []
+            for pi, part in enumerate(nl_parts):
+                is_last = (pi == len(nl_parts) - 1)
+                sents = segmenter.segment(part.strip(), src_lang)
+                for si, sent in enumerate(sents):
+                    items.append((sent, si == len(sents) - 1 and not is_last))
+        else:
+            items = [(text, False)]
 
-        for sentence in sentences:
+        for sentence, trailing_nl in items:
             unit_counter += 1
             unit_elem = etree.SubElement(file_elem, f'{{{NS22}}}unit')
             unit_elem.set('id',          str(unit_counter))
             unit_elem.set('x-excel-row', str(row_idx))
             seg_elem = etree.SubElement(unit_elem, f'{{{NS22}}}segment')
             seg_elem.set('id', str(unit_counter))
-            src_elem = etree.SubElement(seg_elem, f'{{{NS22}}}source')
-            src_elem.text = sentence
+            seg_elem.append(_build_source(NS22, sentence, trailing_nl))
             etree.SubElement(seg_elem, f'{{{NS22}}}target')
 
     wb.close()
