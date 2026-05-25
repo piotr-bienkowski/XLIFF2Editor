@@ -2538,17 +2538,18 @@ class XLIFFEditor(QMainWindow):
         if not file_paths:
             return
         
-        # Ask for output location
+        # Ask for output location — default to first source file's name + .xlf
+        default_out = str(Path(file_paths[0]).with_suffix('.xlf'))
         output_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Converted XLIFF 2.2 File",
-            "",
+            default_out,
             "XLIFF Files (*.xlf *.xliff);;All Files (*)"
         )
-        
+
         if not output_path:
             return
-        
+
         try:
             # Convert using the module
             result = converter.convert_sdlxliff_to_xliff22(
@@ -2675,10 +2676,11 @@ class XLIFFEditor(QMainWindow):
         if not file_paths:
             return
 
+        default_out = str(Path(file_paths[0]).with_suffix('.xlf'))
         output_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Converted XLIFF 2.2 File",
-            "",
+            default_out,
             "XLIFF Files (*.xlf *.xliff);;All Files (*)"
         )
         if not output_path:
@@ -2800,8 +2802,9 @@ class XLIFFEditor(QMainWindow):
         if not file_path:
             return
 
+        default_out = str(Path(file_path).with_suffix('.xlf'))
         output_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Converted XLIFF 2.2 File", "",
+            self, "Save Converted XLIFF 2.2 File", default_out,
             "XLIFF Files (*.xlf *.xliff);;All Files (*)"
         )
         if not output_path:
