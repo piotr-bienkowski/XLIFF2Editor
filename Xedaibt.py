@@ -2576,7 +2576,7 @@ class XLIFFEditor(QMainWindow):
 
     def export_to_sdlxliff(self):
         """Export current XLIFF 2.2 back to SDLXLIFF file(s)"""
-        if not self.filepath:
+        if not self.xliff_file:
             QMessageBox.warning(self, "No File Open", 
                               "Please open an XLIFF 2.2 file first.")
             return
@@ -2625,7 +2625,7 @@ class XLIFFEditor(QMainWindow):
         try:
             # Merge using the module
             results = merger.batch_merge_xliff22_to_sdlxliff(
-                self.filepath,
+                self.xliff_file,
                 sdlxliff_dir,
                 output_dir,
                 dry_run=False
@@ -2705,7 +2705,7 @@ class XLIFFEditor(QMainWindow):
 
     def export_to_mqxliff(self):
         """Export current XLIFF 2.2 translations back to memoQ MQXLIFF file(s)"""
-        if not self.filepath:
+        if not self.xliff_file:
             QMessageBox.warning(self, "No File Open",
                               "Please open an XLIFF 2.2 file first.")
             return
@@ -2744,7 +2744,7 @@ class XLIFFEditor(QMainWindow):
 
         try:
             results = merger.batch_merge_xliff22_to_mqxliff(
-                self.filepath, mqxliff_dir, output_dir, dry_run=False
+                self.xliff_file, mqxliff_dir, output_dir, dry_run=False
             )
             success_count = sum(1 for r in results if r['status'] == 'success')
             no_match_count = sum(1 for r in results if r['status'] == 'no_match')
@@ -2835,7 +2835,7 @@ class XLIFFEditor(QMainWindow):
 
     def export_to_excel(self):
         """Export current XLIFF 2.2 translations back to Excel in-place"""
-        if not self.filepath:
+        if not self.xliff_file:
             QMessageBox.warning(self, "No File Open",
                                 "Please open an XLIFF 2.2 file first.")
             return
@@ -2899,7 +2899,7 @@ class XLIFFEditor(QMainWindow):
             return
 
         try:
-            result = merger.merge_xliff22_to_excel(self.filepath, excel_path)
+            result = merger.merge_xliff22_to_excel(self.xliff_file, excel_path)
             QMessageBox.information(
                 self, "Export Successful",
                 f"Written {result['rows_written']} row(s) to "

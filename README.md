@@ -2,7 +2,7 @@
 
 ## Overview
 
-A PyQt6-based graphical XLIFF editor for professional translation workflows. Supports XLIFF 2.0, 2.1, and 2.2 files. Provides tag-aware editing, AI/MT translation via multiple providers (Claude, Gemini, OpenAI, DeepL), translation memory (TMX) support, spell checking, SDL Trados SDLXLIFF conversion, memoQ MQXLIFF conversion, and automatic light/dark theme switching.
+A PyQt6-based graphical XLIFF editor for professional translation workflows. Supports XLIFF 2.0, 2.1, and 2.2 files. Provides tag-aware editing, AI/MT translation via multiple providers (Claude, Gemini, OpenAI, DeepL), translation memory (TMX) support, spell checking, SDL Trados SDLXLIFF conversion, memoQ MQXLIFF conversion, bilingual Excel import/export, and automatic light/dark theme switching.
 
 **A note for Windows users: ** To clone this repository, first you need to install the git binary for Windows ([Git Guides - install git · GitHub](https://github.com/git-guides/install-git)) and then open a command line window (cmd) and enter the following:
 
@@ -44,15 +44,17 @@ The application detects the system theme at startup and applies light or dark mo
 
 ### Python Packages (Optional)
 
-AI/MT translation and spell checking are optional features. Install only the packages for the providers you intend to use.
+AI/MT translation, spell checking, and Excel import/export are optional features. Install only the packages for the functionality you intend to use.
 
-| Package               | Provider | Purpose                                         |
-| --------------------- | -------- | ----------------------------------------------- |
-| `anthropic`           | Claude   | Claude API client                               |
-| `google-generativeai` | Gemini   | Google Gemini API client                        |
-| `openai`              | OpenAI   | OpenAI API client                               |
-| `deepl`               | DeepL    | DeepL MT API client                             |
-| `pyenchant`           | —        | Spell checking (gracefully disabled if missing) |
+| Package               | Provider/Feature | Purpose                                         |
+| --------------------- | ---------------- | ----------------------------------------------- |
+| `anthropic`           | Claude           | Claude API client                               |
+| `google-generativeai` | Gemini           | Google Gemini API client                        |
+| `openai`              | OpenAI           | OpenAI API client                               |
+| `deepl`               | DeepL            | DeepL MT API client                             |
+| `pyenchant`           | —                | Spell checking (gracefully disabled if missing) |
+| `openpyxl`            | Excel            | Read/write Excel workbooks (.xlsx)              |
+| `regex`               | Excel            | Unicode-aware SRX segmentation (falls back to stdlib `re` if missing) |
 
 ### System Dependencies
 
@@ -68,6 +70,10 @@ AI/MT translation and spell checking are optional features. Install only the pac
 | `xliff22_to_sdlxliff_batch_merger.py` | Merges XLIFF 2.2 translations back into SDLXLIFF files |
 | `mqxliff_xliff22_converter.py`        | Converts memoQ MQXLIFF files to XLIFF 2.2              |
 | `xliff22_to_mqxliff_merger.py`        | Merges XLIFF 2.2 translations back into MQXLIFF files  |
+| `excel_xliff22_converter.py`          | Converts bilingual Excel workbooks to XLIFF 2.2        |
+| `xliff22_to_excel_merger.py`          | Merges XLIFF 2.2 translations back into Excel          |
+| `srx_segmenter.py`                    | SRX 2.0 sentence segmenter (used by Excel converter)   |
+| `segment.srx`                         | SRX 2.0 segmentation rules                            |
 
 ---
 
@@ -84,6 +90,12 @@ pip install anthropic                # Claude
 pip install google-generativeai      # Gemini
 pip install openai                   # OpenAI
 pip install deepl                    # DeepL
+```
+
+For Excel import/export:
+
+```bash
+pip install openpyxl regex
 ```
 
 For spell checking dictionaries (Debian/Ubuntu):
@@ -158,6 +170,40 @@ On first launch after upgrading, the editor automatically migrates settings from
 | --------------------------- | ------------------------------------------------------------- |
 | Import from memoQ (MQXLIFF) | Convert one or more MQXLIFF files to XLIFF 2.2 format         |
 | Export to memoQ (MQXLIFF)   | Merge XLIFF 2.2 translations back into original MQXLIFF files |
+
+### Bilingual Excel Conversion (File → Excel)
+
+| Feature              | Description                                                                   |
+| -------------------- | ----------------------------------------------------------------------------- |
+| Import from Excel    | Convert a bilingual Excel workbook (.xlsx) to XLIFF 2.2 for editing           |
+| Export to Excel      | Merge XLIFF 2.2 translations back into the original Excel file in-place       |
+
+An **Import dialog** lets you specify:
+
+| Setting         | Default | Description                                              |
+| --------------- | ------- | -------------------------------------------------------- |
+| Source language | `en-US` | BCP-47 language tag for the source column                |
+| Target language | `pl-PL` | BCP-47 language tag for the target column                |
+| Source column   | `A`     | Excel column letter(s) containing source text            |
+| Target column   | `B`     | Excel column letter(s) where translations will be merged |
+| First data row  | `2`     | First row number containing translatable content (skips header rows) |
+| Segment source  | off     | When checked, splits source cells into sentence-level units using SRX 2.0 rules |
+
+After import, the XLIFF is offered for saving under the original filename with a `.xlf` extension.
+
+**Round-trip metadata** is stored in the XLIFF so the merger knows where to write each translation back:
+
+- `x-excel-row` on each `<unit>` — the 1-based Excel row number the segment came from
+- `x-excel-src-col` / `x-excel-tgt-col` on `<file>` — the source and target column letters
+
+**Segmentation** (`Segment source` checkbox):
+
+When segmentation is enabled, long source cells are split into sentence-level `<unit>` elements using SRX 2.0 rules (`segment.srx`). Multiple units from the same cell share the same `x-excel-row` and are joined back on export. Alt+Enter line breaks (`\n`) within a cell are handled separately from SRX rules:
+
+- `\n` followed by an uppercase letter is treated as a segment boundary regardless of punctuation.
+- `\n` followed by a lowercase letter (a typographic line wrap within a sentence) is preserved as an inline `<ph equiv="\n"/>` tag.
+
+On **export**, the merger reconstructs the original cell structure: segments are joined with a space for SRX-based boundaries and with `\n` for Alt+Enter boundaries. Inline `<ph equiv="\n"/>` tags in translated segments are converted back to `\n` characters in the Excel cell.
 
 The memoQ converter handles XLIFF 1.2 files with the `MQXliff` namespace extension as exported by memoQ. Inline tags (`bpt`/`ept` flat pairs, `g`, `ph`, `x`) are converted to XLIFF 2.2 `pc`/`ph` elements for editing and converted back on export. The `mq:status` attribute is mapped to/from XLIFF 2.2 `state` using the values defined in `MQXliffSchema-4-0-21.xsd`.
 
@@ -299,6 +345,7 @@ The custom editor (`TagProtectedTextEdit`) provides:
 
 - **SDLXLIFF** (.sdlxliff) — SDL Trados format (import/export)
 - **MQXLIFF** (.mqxliff) — memoQ format (import/export)
+- **Excel** (.xlsx) — bilingual workbook format (import/export)
 
 ---
 
@@ -450,3 +497,61 @@ python xliff22_to_mqxliff_merger.py merged.xlf \
 ```
 
 File matching uses exact filename lookup (the file ID in XLIFF 2.2 is set to the original MQXLIFF filename), with case-insensitive fallback. Updated files are written to `--output-dir`; originals are not modified.
+
+---
+
+## Converter Module: excel_xliff22_converter.py
+
+Converts a bilingual Excel workbook (.xlsx) to XLIFF 2.2. Can be used standalone or via the **File → Excel → Import from Excel** menu.
+
+### Using the converter from your own script
+
+```python
+from XLIFF2Editor.excel_xliff22_converter import convert_excel_to_xliff22
+
+stats = convert_excel_to_xliff22(
+    input_path="brochure.xlsx",
+    output_path="brochure.xlf",
+    src_lang="en-US",
+    tgt_lang="pl-PL",
+    src_col="A",        # column letter(s) for source text
+    tgt_col="B",        # column letter(s) for target text
+    first_row=2,        # first data row (skip header)
+    segment=True,       # split cells into sentence-level units
+    srx_path=None,      # defaults to segment.srx next to this file
+)
+print(f"Converted {stats['total_rows']} rows into {stats['total_units']} units.")
+```
+
+### Newline handling
+
+Excel cells often contain Alt+Enter (`\n`) line breaks. The converter handles them in two ways:
+
+- **`\n` before an uppercase letter** — treated as a segment boundary. The text is pre-split at this point before SRX rules are applied. The boundary is marked with a trailing `<ph equiv="\n"/>` on the last sentence of the preceding block.
+- **`\n` before a lowercase letter** — a typographic line wrap within a sentence. Preserved as an inline `<ph equiv="\n"/>` in the `<source>` element.
+
+This ensures that cells like `"Sentence one.\nBecause of this."` and `"Title line\ncontinued in lower case"` are handled correctly on both import and export.
+
+---
+
+## Converter Module: xliff22_to_excel_merger.py
+
+Merges XLIFF 2.2 translations back into the original Excel workbook in-place (target column only).
+
+### Using the merger from your own script
+
+```python
+from XLIFF2Editor.xliff22_to_excel_merger import merge_xliff22_to_excel
+
+result = merge_xliff22_to_excel(
+    xliff_path="brochure.xlf",
+    excel_path="brochure.xlsx",   # modified in-place
+)
+print(f"Written {result['rows_written']} row(s), skipped {result['units_skipped']}.")
+```
+
+The merger reads `x-excel-tgt-col` from the XLIFF `<file>` element to determine which Excel column to write to, so the correct column is always used regardless of what was entered in the import dialog. It raises `ValueError` if the XLIFF was not produced by `convert_excel_to_xliff22`.
+
+### Newline reconstruction
+
+Segment boundaries that originated from Alt+Enter line breaks are identified by a trailing `<ph>` on the source element (empty tail, any `equiv` value — translation tools may change `equiv="\n"` to a space). Such boundaries are joined with `\n` in the merged cell; SRX-based sentence boundaries are joined with a space. Trailing `<ph>` tags are stripped from the target text before writing. Inline `<ph equiv="\n"/>` tags within a target are converted back to `\n`.
