@@ -2832,12 +2832,12 @@ class XLIFFEditor(QMainWindow):
 
     def export_to_excel(self):
         """Export current XLIFF 2.2 translations back to Excel in-place"""
-        if not self.xliff_soup:
+        if not self.filepath:
             QMessageBox.warning(self, "No File Open",
                                 "Please open an XLIFF 2.2 file first.")
             return
 
-        file_tag = self.xliff_soup.find('file')
+        file_tag = self.xliff_soup.find('file') if self.xliff_soup else None
         if not file_tag or not file_tag.get('x-excel-tgt-col'):
             QMessageBox.warning(
                 self, "Not an Excel XLIFF",
