@@ -2876,6 +2876,16 @@ class XLIFFEditor(QMainWindow):
                 return
             elif reply == QMessageBox.StandardButton.Yes:
                 self.save_xliff()
+            else:
+                confirm = QMessageBox.warning(
+                    self, "Unsaved Changes Will Not Be Exported",
+                    "Your unsaved edits will NOT be included in the export.\n\n"
+                    "Only the last saved version will be written to Excel.\n\n"
+                    "Continue anyway?",
+                    QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+                )
+                if confirm != QMessageBox.StandardButton.Ok:
+                    return
 
         default_name = file_tag.get('original', '')
         excel_path, _ = QFileDialog.getOpenFileName(

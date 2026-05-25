@@ -41,7 +41,7 @@ def _make_excel(rows, first_row=2):
 def _make_xliff(units, tgt_col='B'):
     """units = [(row, source_text, target_text), ...]. Returns path to temp xliff."""
     root = etree.Element(f'{{{NS22}}}xliff', nsmap={None: NS22})
-    root.set('version', '2.0')
+    root.set('version', '2.2')
     root.set('srcLang', 'en-US')
     root.set('trgLang', 'pl-PL')
     file_elem = etree.SubElement(root, f'{{{NS22}}}file')
