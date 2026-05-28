@@ -892,6 +892,27 @@ class AITranslationThread(QThread):
 
 # --- Main Editor ---
 
+def _filter_matches(src_text: str, trg_text: str, src_pat, trg_pat, use_and: bool) -> bool:
+    """Return True if a segment row should be visible given the active filter.
+
+    src_pat / trg_pat: compiled re.Pattern for regex mode, plain str for
+    case-insensitive contains, or None for no filter on that column.
+    use_and: True = both non-None patterns must match; False = either suffices.
+    """
+    def hit(text: str, pat) -> bool:
+        if isinstance(pat, str):
+            return pat.lower() in text.lower()
+        return bool(pat.search(text))
+
+    if src_pat is None and trg_pat is None:
+        return True
+    if src_pat is not None and trg_pat is None:
+        return hit(src_text, src_pat)
+    if trg_pat is not None and src_pat is None:
+        return hit(trg_text, trg_pat)
+    sm, tm = hit(src_text, src_pat), hit(trg_text, trg_pat)
+    return (sm and tm) if use_and else (sm or tm)
+
 class XLIFFEditor(QMainWindow):
     def __init__(self):
         super().__init__()
