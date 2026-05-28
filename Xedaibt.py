@@ -2399,13 +2399,20 @@ class XLIFFEditor(QMainWindow):
         if not self.segments:
             QMessageBox.warning(self, "No File", "Please open an XLIFF file first.")
             return
-        
+
+        # Count visible rows before confirmation dialog
+        visible_count = sum(
+            1 for row in range(len(self.segments))
+            if not self.table.isRowHidden(row)
+        )
+        filter_note = f"\n\n(A filter is active — {len(self.segments) - visible_count} hidden rows will not be affected.)" if visible_count < len(self.segments) else ""
+
         # Confirm action
         reply = QMessageBox.question(
-            self, 
+            self,
             "Copy All Sources to Targets",
-            f"This will copy all {len(self.segments)} source segments to their corresponding targets.\n\n"
-            "Existing target content will be overwritten.\n\nAre you sure?",
+            f"This will copy {visible_count} source segment(s) to their corresponding targets.\n\n"
+            f"Existing target content will be overwritten.{filter_note}\n\nAre you sure?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
@@ -2424,6 +2431,7 @@ class XLIFFEditor(QMainWindow):
 
         try:
             skipped_count = 0
+            copied_count = 0
             for row in range(len(self.segments)):
                 if progress.wasCanceled():
                     break
@@ -2439,6 +2447,7 @@ class XLIFFEditor(QMainWindow):
                 source_text = self.segments[row]['source']
                 self.table.item(row, 3).setText(source_text)  # Column 3 is now Target
                 self.segments[row]['target'] = source_text
+                copied_count += 1
                 
                 # Update progress every 10 rows or on last row
                 if row % 10 == 0 or row == len(self.segments) - 1:
@@ -2449,7 +2458,6 @@ class XLIFFEditor(QMainWindow):
             self.is_modified = True
             
             if not progress.wasCanceled():
-                copied_count = len(self.segments) - skipped_count
                 msg = f"Copied {copied_count} sources to targets."
                 if skipped_count > 0:
                     msg += f"\n\nSkipped {skipped_count} locked segment(s)."
