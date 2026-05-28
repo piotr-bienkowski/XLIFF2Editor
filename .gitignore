@@ -1,3 +1,6 @@
+# Worktrees
+.worktrees/
+
 # Settings file — contains API keys, never commit
 xconfig.json
 xconfig.tmp
