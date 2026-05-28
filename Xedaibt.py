@@ -1190,7 +1190,7 @@ class XLIFFEditor(QMainWindow):
         splitter.addWidget(self.tm_list)
         
         splitter.setStretchFactor(0, 4)
-        main_layout.addWidget(splitter)
+        main_layout.addWidget(splitter, stretch=1)
 
     def _default_xconfig(self) -> dict:
         return {
