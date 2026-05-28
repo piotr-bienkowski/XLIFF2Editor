@@ -1168,9 +1168,11 @@ class XLIFFEditor(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)  # Target
         self.table.setColumnWidth(1, 28)  # File column — icon only
         self.table.setWordWrap(True)
-        # Use ResizeToContents to auto-adjust row heights based on delegate's sizeHint
-        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        # Fixed mode with lazy per-row sizing: _resize_visible_rows() sizes only viewport rows on demand.
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.table.verticalHeader().setDefaultSectionSize(60)
         self.table.verticalHeader().hide()
+        self.table.verticalScrollBar().valueChanged.connect(self._resize_visible_rows)
         
         # Enable immediate editing - CurrentChanged opens editor when you select a different cell
         self.table.setEditTriggers(
@@ -1816,6 +1818,20 @@ class XLIFFEditor(QMainWindow):
         self.filter_target.clear()
         for row in range(self.table.rowCount()):
             self.table.setRowHidden(row, False)
+
+    def _resize_visible_rows(self):
+        """Resize only the rows currently visible in the viewport to their content height."""
+        vp = self.table.viewport()
+        first = self.table.rowAt(0)
+        last = self.table.rowAt(vp.height() - 1)
+        if first < 0:
+            return
+        if last < 0:
+            # Content doesn't fill the viewport; resize to the actual last row.
+            last = self.table.rowCount() - 1
+        for row in range(first, last + 1):
+            if not self.table.isRowHidden(row):
+                self.table.resizeRowToContents(row)
 
     def insert_next_tag(self):
         """Finds the next tag in source not used in target and inserts it."""
