@@ -575,9 +575,14 @@ class RichTextDelegate(QStyledItemDelegate):
             doc.setTextWidth(col_width - 10)
             doc_height = doc.size().height()
             required_height = max(30, int(doc_height) + 14)
-            table.setRowHeight(index.row(), required_height)
+            # Only grow — never shrink from here. adjust_editor_height handles shrinking
+            # during active typing. Growing here terminates after one step because the
+            # second call finds rowHeight == required_height and skips setRowHeight.
+            if table.rowHeight(index.row()) < required_height:
+                table.setRowHeight(index.row(), required_height)
+            actual_row_height = table.rowHeight(index.row())
             editor_rect = QRect(option.rect)
-            editor_rect.setHeight(required_height)
+            editor_rect.setHeight(actual_row_height)
             editor.setGeometry(editor_rect)
         else:
             super().updateEditorGeometry(editor, option, index)
