@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QTableWidget, QTableWidg
                              QProgressDialog, QStyledItemDelegate, QTextEdit, QPlainTextEdit,
                              QInputDialog, QDialog, QLabel, QLineEdit, QPushButton, QFormLayout,
                              QMenu, QColorDialog, QToolBar, QComboBox, QSizePolicy, QCheckBox)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRect, QRegularExpression, QModelIndex
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRect, QRegularExpression, QModelIndex, QTimer
 from PyQt6.QtGui import (QAction, QKeySequence, QPalette, QColor, QTextDocument,
                          QAbstractTextDocumentLayout, QTextCharFormat, QTextCursor,
                          QBrush, QKeyEvent, QFont, QTextOption, QPainter, QPen, QPainterPath)
@@ -1508,8 +1508,12 @@ class XLIFFEditor(QMainWindow):
         # Apply to TM list
         self.tm_list.setFont(font)
         
-        # Force table to refresh with new font
-        self.table.resizeRowsToContents()
+        # Reset all rows to font-size-aware default, then size visible rows lazily
+        default_h = max(60, self.font_size * 6)
+        self.table.verticalHeader().setDefaultSectionSize(default_h)
+        for row in range(self.table.rowCount()):
+            self.table.setRowHeight(row, default_h)
+        self._resize_visible_rows()
 
     def detect_system_theme(self) -> str:
         lightness = QApplication.palette().color(QPalette.ColorRole.Window).lightness()
@@ -1794,6 +1798,7 @@ class XLIFFEditor(QMainWindow):
             
         self.table.itemChanged.connect(self.on_item_changed)
         self.clear_filter()
+        QTimer.singleShot(0, self._resize_visible_rows)
 
     def apply_filter(self):
         src_text = self.filter_source.text()
@@ -1812,12 +1817,14 @@ class XLIFFEditor(QMainWindow):
             src = self.table.item(row, 2).text() if self.table.item(row, 2) else ""
             trg = self.table.item(row, 3).text() if self.table.item(row, 3) else ""
             self.table.setRowHidden(row, not _filter_matches(src, trg, src_pat, trg_pat, use_and))
+        self._resize_visible_rows()
 
     def clear_filter(self):
         self.filter_source.clear()
         self.filter_target.clear()
         for row in range(self.table.rowCount()):
             self.table.setRowHidden(row, False)
+        self._resize_visible_rows()
 
     def _resize_visible_rows(self):
         """Resize only the rows currently visible in the viewport to their content height."""
@@ -2031,6 +2038,7 @@ class XLIFFEditor(QMainWindow):
             val = item.text()
             self.segments[row]['target'] = val
             self.is_modified = True
+            self.table.resizeRowToContents(row)
             count = self._propagate_to_identical(self.segments[row]['source'], val, row)
             if count:
                 self.statusBar().showMessage(f"Propagated to {count} identical segment(s).", 3000)
