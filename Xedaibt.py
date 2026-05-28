@@ -1831,7 +1831,7 @@ class XLIFFEditor(QMainWindow):
         if last < 0:
             # Content doesn't fill the viewport; resize to the actual last row.
             last = self.table.rowCount() - 1
-        editing_row = self.table.itemDelegate()._active_row
+        editing_row = self.table.itemDelegateForColumn(3)._active_row
         for row in range(first, last + 1):
             if not self.table.isRowHidden(row) and row != editing_row:
                 self.table.resizeRowToContents(row)
