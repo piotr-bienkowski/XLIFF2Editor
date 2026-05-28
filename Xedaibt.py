@@ -2182,6 +2182,7 @@ class XLIFFEditor(QMainWindow):
             if QMessageBox.question(self, "Save?", "Save changes?") == QMessageBox.StandardButton.Yes:
                 self.save_xliff()
         self.table.setRowCount(0)
+        self.clear_filter()
         self.segments = []
         self.xliff_file = None
         self.xliff_soup = None
@@ -2318,19 +2319,27 @@ class XLIFFEditor(QMainWindow):
             return
         
         # Confirm action
+        visible_count = sum(
+            1 for row in range(len(self.segments))
+            if not self.table.isRowHidden(row)
+        )
+        filter_note = (
+            f"\n\n(A filter is active — {len(self.segments) - visible_count} hidden rows will not be affected.)"
+            if visible_count < len(self.segments) else ""
+        )
         reply = QMessageBox.question(
-            self, 
+            self,
             "Clear All Targets",
-            f"This will clear all {len(self.segments)} target segments.\n\nAre you sure?",
+            f"This will clear {visible_count} target segment(s).\n\nAre you sure?{filter_note}",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
-        
+
         if reply != QMessageBox.StandardButton.Yes:
             return
-        
+
         # Show progress dialog
-        progress = QProgressDialog("Clearing all targets...", "Cancel", 0, len(self.segments), self)
+        progress = QProgressDialog("Clearing all targets...", "Cancel", 0, visible_count, self)
         progress.setWindowTitle("Clear All Targets")
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.show()
@@ -2340,31 +2349,38 @@ class XLIFFEditor(QMainWindow):
         
         try:
             skipped_count = 0
+            cleared_count = 0
+            progress_value = 0
             for row in range(len(self.segments)):
                 if progress.wasCanceled():
                     break
-                
+
+                # Skip hidden (filtered-out) segments
+                if self.table.isRowHidden(row):
+                    continue
+
                 # Skip locked segments
                 if self.segments[row].get('locked', False):
                     skipped_count += 1
                     continue
-                
+
                 # Clear target text and set state to initial
                 self.table.item(row, 3).setText("")  # Column 3 is now Target
                 self.table.item(row, 4).setText("initial")  # Column 4 is now Status
                 self.segments[row]['target'] = ""
                 self.segments[row]['state'] = "initial"
-                
-                # Update progress every 10 rows or on last row
-                if row % 10 == 0 or row == len(self.segments) - 1:
-                    progress.setValue(row + 1)
+                cleared_count += 1
+
+                # Update progress every 10 rows
+                progress_value += 1
+                if progress_value % 10 == 0 or progress_value == visible_count:
+                    progress.setValue(progress_value)
                     QApplication.processEvents()  # Keep UI responsive
-            
-            progress.setValue(len(self.segments))
+
+            progress.setValue(visible_count)
             self.is_modified = True
-            
+
             if not progress.wasCanceled():
-                cleared_count = len(self.segments) - skipped_count
                 msg = f"Cleared {cleared_count} target(s)."
                 if skipped_count > 0:
                     msg += f"\n\nSkipped {skipped_count} locked segment(s)."
@@ -2421,7 +2437,7 @@ class XLIFFEditor(QMainWindow):
             return
         
         # Show progress dialog
-        progress = QProgressDialog("Copying sources to targets...", "Cancel", 0, len(self.segments), self)
+        progress = QProgressDialog("Copying sources to targets...", "Cancel", 0, visible_count, self)
         progress.setWindowTitle("Copy Sources to Targets")
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.show()
@@ -2447,14 +2463,13 @@ class XLIFFEditor(QMainWindow):
                 source_text = self.segments[row]['source']
                 self.table.item(row, 3).setText(source_text)  # Column 3 is now Target
                 self.segments[row]['target'] = source_text
+                # Update progress every 10 rows
                 copied_count += 1
-                
-                # Update progress every 10 rows or on last row
-                if row % 10 == 0 or row == len(self.segments) - 1:
-                    progress.setValue(row + 1)
+                if copied_count % 10 == 0 or copied_count == visible_count:
+                    progress.setValue(copied_count)
                     QApplication.processEvents()  # Keep UI responsive
-            
-            progress.setValue(len(self.segments))
+
+            progress.setValue(visible_count)
             self.is_modified = True
             
             if not progress.wasCanceled():
@@ -2534,7 +2549,8 @@ class XLIFFEditor(QMainWindow):
             return
 
         to_tr = [(r, s['source']) for r, s in enumerate(self.segments)
-                 if s['state'] == 'initial' and s['source'].strip() and not s.get('locked', False)]
+                 if s['state'] == 'initial' and s['source'].strip()
+                 and not s.get('locked', False) and not self.table.isRowHidden(r)]
 
         if not to_tr:
             QMessageBox.information(self, "Nothing to Translate",
