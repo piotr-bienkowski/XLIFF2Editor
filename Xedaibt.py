@@ -534,24 +534,16 @@ class RichTextDelegate(QStyledItemDelegate):
         """Adjust row height based on editor content"""
         if not isinstance(editor, TagProtectedTextEdit):
             return
-        
-        # Calculate required height
+        width = editor.width()
+        if width <= 0:
+            # Editor not yet placed; updateEditorGeometry handles initial sizing.
+            return
         doc = editor.document()
-        doc.setTextWidth(editor.width() - 10)  # Account for margins
+        doc.setTextWidth(width - 10)
         doc_height = doc.size().height()
-        
-        # Add padding for border and spacing
-        required_height = int(doc_height) + 14  # Extra for orange border (2px * 2) + padding
-        
-        # Set minimum height
-        if required_height < 30:
-            required_height = 30
-        
-        # Get current row height
+        required_height = max(30, int(doc_height) + 14)
         table = self.editor_window.table
         current_height = table.rowHeight(index.row())
-        
-        # Only update if height needs to change
         if abs(current_height - required_height) > 5:
             table.setRowHeight(index.row(), required_height)
     
@@ -577,25 +569,15 @@ class RichTextDelegate(QStyledItemDelegate):
     def updateEditorGeometry(self, editor, option, index):
         """Update the editor's geometry to fill the entire cell"""
         if isinstance(editor, TagProtectedTextEdit):
-            # First, calculate and set the proper row height based on content
-            doc = editor.document()
-            doc.setTextWidth(option.rect.width() - 10)
-            doc_height = doc.size().height()
-            required_height = int(doc_height) + 14  # Account for border and padding
-            
-            if required_height < 30:
-                required_height = 30
-            
-            # Update row height if needed
             table = self.editor_window.table
-            if table.rowHeight(index.row()) < required_height:
-                table.setRowHeight(index.row(), required_height)
-            
-            # Now set editor geometry to fill the entire cell
-            # Use the actual row height, not the calculated one
-            actual_row_height = table.rowHeight(index.row())
-            editor_rect = option.rect
-            editor_rect.setHeight(actual_row_height)
+            col_width = option.rect.width() or table.columnWidth(index.column())
+            doc = editor.document()
+            doc.setTextWidth(col_width - 10)
+            doc_height = doc.size().height()
+            required_height = max(30, int(doc_height) + 14)
+            table.setRowHeight(index.row(), required_height)
+            editor_rect = QRect(option.rect)
+            editor_rect.setHeight(required_height)
             editor.setGeometry(editor_rect)
         else:
             super().updateEditorGeometry(editor, option, index)
