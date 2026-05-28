@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QTableWidget, QTableWidg
                              QListWidget, QSplitter, QHeaderView, QAbstractItemView,
                              QProgressDialog, QStyledItemDelegate, QTextEdit, QPlainTextEdit,
                              QInputDialog, QDialog, QLabel, QLineEdit, QPushButton, QFormLayout,
-                             QMenu, QColorDialog, QToolBar, QComboBox, QSizePolicy)
+                             QMenu, QColorDialog, QToolBar, QComboBox, QSizePolicy, QCheckBox)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRect, QRegularExpression, QModelIndex
 from PyQt6.QtGui import (QAction, QKeySequence, QPalette, QColor, QTextDocument,
                          QAbstractTextDocumentLayout, QTextCharFormat, QTextCursor,
@@ -1123,7 +1123,40 @@ class XLIFFEditor(QMainWindow):
 
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
-        main_layout = QHBoxLayout(main_widget)
+        main_layout = QVBoxLayout(main_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # Filter bar
+        filter_bar = QWidget()
+        filter_layout = QHBoxLayout(filter_bar)
+        filter_layout.setContentsMargins(4, 2, 4, 2)
+        filter_layout.addWidget(QLabel("Source:"))
+        self.filter_source = QLineEdit()
+        self.filter_source.setPlaceholderText("Filter source…")
+        self.filter_source.returnPressed.connect(self.apply_filter)
+        filter_layout.addWidget(self.filter_source)
+        filter_layout.addWidget(QLabel("Target:"))
+        self.filter_target = QLineEdit()
+        self.filter_target.setPlaceholderText("Filter target…")
+        self.filter_target.returnPressed.connect(self.apply_filter)
+        filter_layout.addWidget(self.filter_target)
+        self.filter_logic = QComboBox()
+        self.filter_logic.addItems(["AND", "OR"])
+        filter_layout.addWidget(self.filter_logic)
+        self.filter_regex = QCheckBox("Regex")
+        filter_layout.addWidget(self.filter_regex)
+        btn_filter = QPushButton("🔍")
+        btn_filter.setToolTip("Apply filter")
+        btn_filter.clicked.connect(self.apply_filter)
+        filter_layout.addWidget(btn_filter)
+        btn_clear = QPushButton("✕")
+        btn_clear.setToolTip("Clear filter")
+        btn_clear.clicked.connect(self.clear_filter)
+        filter_layout.addWidget(btn_clear)
+        filter_layout.addStretch()
+        main_layout.addWidget(filter_bar)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         
         self.table = QTableWidget()
