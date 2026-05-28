@@ -502,11 +502,13 @@ class RichTextDelegate(QStyledItemDelegate):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.editor_window = parent  # Store reference to main window
-    
+        self._active_row = -1
+
     def createEditor(self, parent, option, index):
         """Create custom editor with tag protection"""
         # Only use custom editor for target column (column 3)
         if index.column() == 3:  # Column 3 is now Target
+            self._active_row = index.row()
             editor = TagProtectedTextEdit(parent)
             # Add orange border to the editor
             editor.setStyleSheet("QPlainTextEdit { border: 2px solid orange; }")
@@ -529,6 +531,10 @@ class RichTextDelegate(QStyledItemDelegate):
 
             return editor
         return super().createEditor(parent, option, index)
+
+    def destroyEditor(self, editor, index):
+        self._active_row = -1
+        super().destroyEditor(editor, index)
     
     def adjust_editor_height(self, editor, index):
         """Adjust row height based on editor content"""
@@ -545,7 +551,11 @@ class RichTextDelegate(QStyledItemDelegate):
         table = self.editor_window.table
         current_height = table.rowHeight(index.row())
         if abs(current_height - required_height) > 5:
-            table.setRowHeight(index.row(), required_height)
+            # Defer so the viewport repaint happens after the delegate callback
+            # returns — calling setRowHeight synchronously here causes mid-render
+            # repaints that produce overlapping paint artefacts.
+            r, h = index.row(), required_height
+            QTimer.singleShot(0, lambda: table.setRowHeight(r, h))
     
     def setEditorData(self, editor, index):
         """Set the editor's content from the model"""
@@ -575,12 +585,10 @@ class RichTextDelegate(QStyledItemDelegate):
             doc.setTextWidth(col_width - 10)
             doc_height = doc.size().height()
             required_height = max(30, int(doc_height) + 14)
-            # Only grow — never shrink from here. adjust_editor_height handles shrinking
-            # during active typing. Growing here terminates after one step because the
-            # second call finds rowHeight == required_height and skips setRowHeight.
             if table.rowHeight(index.row()) < required_height:
-                table.setRowHeight(index.row(), required_height)
-            actual_row_height = table.rowHeight(index.row())
+                r, h = index.row(), required_height
+                QTimer.singleShot(0, lambda: table.setRowHeight(r, h))
+            actual_row_height = max(table.rowHeight(index.row()), required_height)
             editor_rect = QRect(option.rect)
             editor_rect.setHeight(actual_row_height)
             editor.setGeometry(editor_rect)
@@ -1823,8 +1831,9 @@ class XLIFFEditor(QMainWindow):
         if last < 0:
             # Content doesn't fill the viewport; resize to the actual last row.
             last = self.table.rowCount() - 1
+        editing_row = self.table.itemDelegate()._active_row
         for row in range(first, last + 1):
-            if not self.table.isRowHidden(row):
+            if not self.table.isRowHidden(row) and row != editing_row:
                 self.table.resizeRowToContents(row)
 
     def insert_next_tag(self):
