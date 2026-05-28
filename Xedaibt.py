@@ -1791,6 +1791,31 @@ class XLIFFEditor(QMainWindow):
             self.table.setItem(row, 4, status_item)
             
         self.table.itemChanged.connect(self.on_item_changed)
+        self.clear_filter()
+
+    def apply_filter(self):
+        src_text = self.filter_source.text()
+        trg_text = self.filter_target.text()
+        use_regex = self.filter_regex.isChecked()
+        use_and = self.filter_logic.currentText() == "AND"
+
+        try:
+            src_pat = re.compile(src_text, re.IGNORECASE) if (src_text and use_regex) else (src_text or None)
+            trg_pat = re.compile(trg_text, re.IGNORECASE) if (trg_text and use_regex) else (trg_text or None)
+        except re.error as e:
+            QMessageBox.warning(self, "Invalid Regex", str(e))
+            return
+
+        for row in range(self.table.rowCount()):
+            src = self.table.item(row, 2).text() if self.table.item(row, 2) else ""
+            trg = self.table.item(row, 3).text() if self.table.item(row, 3) else ""
+            self.table.setRowHidden(row, not _filter_matches(src, trg, src_pat, trg_pat, use_and))
+
+    def clear_filter(self):
+        self.filter_source.clear()
+        self.filter_target.clear()
+        for row in range(self.table.rowCount()):
+            self.table.setRowHidden(row, False)
 
     def insert_next_tag(self):
         """Finds the next tag in source not used in target and inserts it."""
