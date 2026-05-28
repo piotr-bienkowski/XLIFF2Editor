@@ -2421,18 +2421,20 @@ class XLIFFEditor(QMainWindow):
         
         # Disconnect itemChanged to avoid triggering it for every cell
         self.table.itemChanged.disconnect()
-        
+
         try:
             skipped_count = 0
             for row in range(len(self.segments)):
                 if progress.wasCanceled():
                     break
-                
-                # Skip locked segments
+
+                # Skip hidden (filtered-out) and locked segments
+                if self.table.isRowHidden(row):
+                    continue
                 if self.segments[row].get('locked', False):
                     skipped_count += 1
                     continue
-                
+
                 # Copy source to target (tags are already in the source text as <1>, <2/>, etc.)
                 source_text = self.segments[row]['source']
                 self.table.item(row, 3).setText(source_text)  # Column 3 is now Target
