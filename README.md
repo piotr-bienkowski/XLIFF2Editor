@@ -7,7 +7,6 @@ A PyQt6-based graphical XLIFF editor for professional translation workflows. Sup
 **A note for Windows users: ** To clone this repository, first you need to install the git binary for Windows ([Git Guides - install git · GitHub](https://github.com/git-guides/install-git)) and then open a command line window (cmd) and enter the following:
 
 ```
-
 git clone https://github.com/piotr-bienkowski/XLIFF2Editor.git
 ```
 
@@ -46,14 +45,14 @@ The application detects the system theme at startup and applies light or dark mo
 
 AI/MT translation, spell checking, and Excel import/export are optional features. Install only the packages for the functionality you intend to use.
 
-| Package               | Provider/Feature | Purpose                                         |
-| --------------------- | ---------------- | ----------------------------------------------- |
-| `anthropic`           | Claude           | Claude API client                               |
-| `google-generativeai` | Gemini           | Google Gemini API client                        |
-| `openai`              | OpenAI           | OpenAI API client                               |
-| `deepl`               | DeepL            | DeepL MT API client                             |
-| `pyenchant`           | —                | Spell checking (gracefully disabled if missing) |
-| `openpyxl`            | Excel            | Read/write Excel workbooks (.xlsx)              |
+| Package               | Provider/Feature | Purpose                                                               |
+| --------------------- | ---------------- | --------------------------------------------------------------------- |
+| `anthropic`           | Claude           | Claude API client                                                     |
+| `google-generativeai` | Gemini           | Google Gemini API client                                              |
+| `openai`              | OpenAI           | OpenAI API client                                                     |
+| `deepl`               | DeepL            | DeepL MT API client                                                   |
+| `pyenchant`           | —                | Spell checking (gracefully disabled if missing)                       |
+| `openpyxl`            | Excel            | Read/write Excel workbooks (.xlsx)                                    |
 | `regex`               | Excel            | Unicode-aware SRX segmentation (falls back to stdlib `re` if missing) |
 
 ### System Dependencies
@@ -73,7 +72,7 @@ AI/MT translation, spell checking, and Excel import/export are optional features
 | `excel_xliff22_converter.py`          | Converts bilingual Excel workbooks to XLIFF 2.2        |
 | `xliff22_to_excel_merger.py`          | Merges XLIFF 2.2 translations back into Excel          |
 | `srx_segmenter.py`                    | SRX 2.0 sentence segmenter (used by Excel converter)   |
-| `segment.srx`                         | SRX 2.0 segmentation rules                            |
+| `segment.srx`                         | SRX 2.0 segmentation rules                             |
 
 ---
 
@@ -173,20 +172,20 @@ On first launch after upgrading, the editor automatically migrates settings from
 
 ### Bilingual Excel Conversion (File → Excel)
 
-| Feature              | Description                                                                   |
-| -------------------- | ----------------------------------------------------------------------------- |
-| Import from Excel    | Convert a bilingual Excel workbook (.xlsx) to XLIFF 2.2 for editing           |
-| Export to Excel      | Merge XLIFF 2.2 translations back into the original Excel file in-place       |
+| Feature           | Description                                                             |
+| ----------------- | ----------------------------------------------------------------------- |
+| Import from Excel | Convert a bilingual Excel workbook (.xlsx) to XLIFF 2.2 for editing     |
+| Export to Excel   | Merge XLIFF 2.2 translations back into the original Excel file in-place |
 
 An **Import dialog** lets you specify:
 
-| Setting         | Default | Description                                              |
-| --------------- | ------- | -------------------------------------------------------- |
-| Source language | `en-US` | BCP-47 language tag for the source column                |
-| Target language | `pl-PL` | BCP-47 language tag for the target column                |
-| Source column   | `A`     | Excel column letter(s) containing source text            |
-| Target column   | `B`     | Excel column letter(s) where translations will be merged |
-| First data row  | `2`     | First row number containing translatable content (skips header rows) |
+| Setting         | Default | Description                                                                     |
+| --------------- | ------- | ------------------------------------------------------------------------------- |
+| Source language | `en-US` | BCP-47 language tag for the source column                                       |
+| Target language | `pl-PL` | BCP-47 language tag for the target column                                       |
+| Source column   | `A`     | Excel column letter(s) containing source text                                   |
+| Target column   | `B`     | Excel column letter(s) where translations will be merged                        |
+| First data row  | `2`     | First row number containing translatable content (skips header rows)            |
 | Segment source  | off     | When checked, splits source cells into sentence-level units using SRX 2.0 rules |
 
 After import, the XLIFF is offered for saving under the original filename with a `.xlf` extension.
@@ -224,6 +223,23 @@ The right panel shows two sections when a segment is selected:
 A greyed-out `── glossary ──` separator divides the two sections when both are present.
 
 **TMX loading** uses `lxml.etree.iterparse` — the file is streamed element by element and each parsed node is discarded immediately after use, keeping memory consumption flat at approximately 1× the file size regardless of how large the TMX is.
+
+### Segment Filter Bar
+
+A filter bar sits between the AI toolbar and the segment table. It hides non-matching rows in real time without modifying the file.
+
+| Control | Description |
+| ------- | ----------- |
+| **Filter source…** | Show only segments whose source text contains the entered string |
+| **Filter target…** | Show only segments whose target text contains the entered string |
+| **AND / OR** | When both fields are filled: AND requires both to match; OR requires either to match |
+| **Regex** | Treat filter strings as regular expressions (Python `re` syntax, case-sensitive) |
+| **🔍** | Apply the filter (Enter in either field also applies) |
+| **✕** | Clear both fields and show all rows |
+
+- Filtering is case-insensitive in plain-text mode and case-sensitive in Regex mode.
+- Batch operations (AI Translate All, Copy All Sources to Targets, Clear All Targets) operate only on the **visible** (non-hidden) rows while a filter is active.
+- The filter is cleared automatically when a file is opened or closed.
 
 ### Editing
 

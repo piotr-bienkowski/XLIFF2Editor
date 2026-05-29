@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QTableWidget, QTableWidg
                              QProgressDialog, QStyledItemDelegate, QTextEdit, QPlainTextEdit,
                              QInputDialog, QDialog, QLabel, QLineEdit, QPushButton, QFormLayout,
                              QMenu, QColorDialog, QToolBar, QComboBox, QSizePolicy, QCheckBox)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRect, QRegularExpression, QModelIndex, QTimer
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRect, QSize, QRegularExpression, QModelIndex, QTimer
 from PyQt6.QtGui import (QAction, QKeySequence, QPalette, QColor, QTextDocument,
                          QAbstractTextDocumentLayout, QTextCharFormat, QTextCursor,
                          QBrush, QKeyEvent, QFont, QTextOption, QPainter, QPen, QPainterPath)
@@ -509,15 +509,49 @@ class RichTextDelegate(QStyledItemDelegate):
         # Only use custom editor for target column (column 3)
         if index.column() == 3:  # Column 3 is now Target
             self._active_row = index.row()
-            editor = TagProtectedTextEdit(parent)
-            # Add orange border to the editor
-            editor.setStyleSheet("QPlainTextEdit { border: 2px solid orange; }")
+            
+            table = self.editor_window.table
+            font = table.font()
+            
+            def get_needed_h(text, width):
+                if not text: return 24
+                if width <= 20: return 24
+                doc = QTextDocument()
+                doc.setDefaultFont(font)
+                doc.setDocumentMargin(0)
+                doc.setPlainText(text)
+                doc.setTextWidth(width - 4)
+                return int(doc.size().height()) + 4
 
-            # Disable scrollbars - we want the row to grow instead
+            src_item = table.item(index.row(), 2)
+            src_h = get_needed_h(src_item.text() if src_item else "", table.columnWidth(2))
+            tgt_h = get_needed_h(index.data() or "", table.columnWidth(3))
+            
+            req_h = max(24, src_h, tgt_h)
+            table.setRowHeight(index.row(), req_h)
+            
+            editor = TagProtectedTextEdit(parent)
+            editor.setFont(font)
+            editor.document().setDefaultFont(font)
+            editor.document().setDocumentMargin(0)
+            
+            # Strict black background and white text for the editor
+            pal = editor.palette()
+            pal.setColor(QPalette.ColorRole.Base, QColor(0, 0, 0))
+            pal.setColor(QPalette.ColorRole.Text, QColor(255, 255, 255))
+            editor.setPalette(pal)
+            
+            editor.setStyleSheet("""
+                QPlainTextEdit { 
+                    border: 2px solid orange; 
+                    padding: 0px; 
+                    background-color: black; 
+                    color: white; 
+                }
+            """)
+
             editor.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             editor.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-
-            # Connect to text changes to update row height dynamically
             editor.textChanged.connect(lambda: self.adjust_editor_height(editor, index))
 
             # Set spell checker language from main window
@@ -540,22 +574,25 @@ class RichTextDelegate(QStyledItemDelegate):
         """Adjust row height based on editor content"""
         if not isinstance(editor, TagProtectedTextEdit):
             return
-        width = editor.width()
-        if width <= 0:
-            # Editor not yet placed; updateEditorGeometry handles initial sizing.
-            return
-        doc = editor.document()
-        doc.setTextWidth(width - 10)
-        doc_height = doc.size().height()
-        required_height = max(30, int(doc_height) + 14)
+        
         table = self.editor_window.table
+        width = table.columnWidth(index.column())
+        if width <= 20: return
+            
+        doc = editor.document().clone()
+        doc.setDefaultFont(table.font())
+        doc.setDocumentMargin(0)
+        doc.setPlainText(editor.toPlainText())
+        doc.setTextWidth(width - 4)
+        doc_height = doc.size().height()
+        
+        required_height = max(24, int(doc_height) + 4)
         current_height = table.rowHeight(index.row())
-        if abs(current_height - required_height) > 5:
-            # Defer so the viewport repaint happens after the delegate callback
-            # returns — calling setRowHeight synchronously here causes mid-render
-            # repaints that produce overlapping paint artefacts.
+        
+        if abs(required_height - current_height) > 1:
             r, h = index.row(), required_height
-            QTimer.singleShot(0, lambda: table.setRowHeight(r, h))
+            table.setRowHeight(r, h)
+            editor.setFixedHeight(h)
     
     def setEditorData(self, editor, index):
         """Set the editor's content from the model"""
@@ -563,6 +600,8 @@ class RichTextDelegate(QStyledItemDelegate):
             text = index.data(Qt.ItemDataRole.DisplayRole)
             if text:
                 editor.setPlainText(text)
+                # After setting text, check if we need to resize
+                self.adjust_editor_height(editor, index)
         else:
             super().setEditorData(editor, index)
     
@@ -577,28 +616,29 @@ class RichTextDelegate(QStyledItemDelegate):
             super().setModelData(editor, model, index)
     
     def updateEditorGeometry(self, editor, option, index):
-        """Update the editor's geometry to fill the entire cell"""
+        """Position the editor to fill the cell; row was pre-sized in createEditor."""
         if isinstance(editor, TagProtectedTextEdit):
             table = self.editor_window.table
-            col_width = option.rect.width() or table.columnWidth(index.column())
-            doc = editor.document()
-            doc.setTextWidth(col_width - 10)
-            doc_height = doc.size().height()
-            required_height = max(30, int(doc_height) + 14)
-            if table.rowHeight(index.row()) < required_height:
-                r, h = index.row(), required_height
-                QTimer.singleShot(0, lambda: table.setRowHeight(r, h))
-            actual_row_height = max(table.rowHeight(index.row()), required_height)
-            editor_rect = QRect(option.rect)
-            editor_rect.setHeight(actual_row_height)
-            editor.setGeometry(editor_rect)
+            row_h = table.rowHeight(index.row())
+            
+            # Ensure the editor geometry matches the row exactly
+            rect = option.rect
+            rect.setHeight(row_h)
+            editor.setGeometry(rect)
         else:
             super().updateEditorGeometry(editor, option, index)
     
     def paint(self, painter, option, index):
+        if index.row() == self._active_row:
+            # When the editor is active, we only want to paint the selection background.
+            # Painting text here would cause duplication because the editor is on top.
+            if option.state & QStyle.StateFlag.State_Selected:
+                painter.fillRect(option.rect, option.palette.highlight())
+            return
+
         options = option
         self.initStyleOption(options, index)
-        
+
         # Color tags red using regex
         text = options.text
         # Escape HTML entities in text first to avoid breaking rendering
@@ -622,16 +662,19 @@ class RichTextDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         # Calculate proper height for wrapped text
+        table = self.editor_window.table
+        width = table.columnWidth(index.column())
+        if width <= 20: return super().sizeHint(option, index)
+            
         text = index.data()
         if text:
-            # Escape HTML entities
-            text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-            text = re.sub(r'(&lt;/?\d+/?&gt;)', r'<span style="color:red; font-weight:bold;">\1</span>', text)
-            
             doc = QTextDocument()
-            doc.setHtml(text)
-            doc.setTextWidth(option.rect.width())
-            return doc.size().toSize()
+            doc.setDefaultFont(table.font())
+            doc.setDocumentMargin(0)
+            doc.setPlainText(text)
+            doc.setTextWidth(width - 4)
+            h = int(doc.size().height()) + 4
+            return QSize(width, max(24, h))
         return super().sizeHint(option, index)
 
 # --- Loading Threads ---
@@ -1504,7 +1547,7 @@ class XLIFFEditor(QMainWindow):
         self.tm_list.setFont(font)
         
         # Reset all rows to font-size-aware default, then size visible rows lazily
-        default_h = max(60, self.font_size * 6)
+        default_h = max(24, self.font_size * 2)
         self.table.verticalHeader().setDefaultSectionSize(default_h)
         for row in range(self.table.rowCount()):
             self.table.setRowHeight(row, default_h)
