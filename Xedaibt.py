@@ -2085,8 +2085,7 @@ class XLIFFEditor(QMainWindow):
     def on_cell_changed(self, row, col, p_row, p_col):
         if row >= 0:
             self.current_row = row
-            if not self.segments[row]['target']:
-                self.search_tm(self.segments[row]['source'])
+            self.search_tm(self.segments[row]['source'])
 
     def set_target_language(self):
         """Allow user to set or change the target language"""
