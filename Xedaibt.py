@@ -6,7 +6,7 @@ from pathlib import Path
 from lxml import etree
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QTableWidget, QTableWidgetItem,
                              QVBoxLayout, QHBoxLayout, QWidget, QFileDialog, QMessageBox,
-                             QListWidget, QSplitter, QHeaderView, QAbstractItemView,
+                             QListWidget, QListWidgetItem, QSplitter, QHeaderView, QAbstractItemView,
                              QProgressDialog, QStyledItemDelegate, QTextEdit, QPlainTextEdit,
                              QInputDialog, QDialog, QLabel, QLineEdit, QPushButton, QFormLayout,
                              QMenu, QColorDialog, QToolBar, QComboBox, QSizePolicy, QCheckBox)
