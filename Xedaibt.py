@@ -9,8 +9,9 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QTableWidget, QTableWidg
                              QListWidget, QListWidgetItem, QSplitter, QHeaderView, QAbstractItemView,
                              QProgressDialog, QStyledItemDelegate, QTextEdit, QPlainTextEdit,
                              QInputDialog, QDialog, QLabel, QLineEdit, QPushButton, QFormLayout,
-                             QMenu, QColorDialog, QToolBar, QComboBox, QSizePolicy, QCheckBox)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRect, QSize, QRegularExpression, QModelIndex, QTimer
+                             QMenu, QColorDialog, QToolBar, QComboBox, QSizePolicy, QCheckBox,
+                             QRadioButton, QButtonGroup)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRect, QSize, QRegularExpression, QModelIndex, QTimer, QSettings
 from PyQt6.QtGui import (QAction, QKeySequence, QPalette, QColor, QTextDocument,
                          QAbstractTextDocumentLayout, QTextCharFormat, QTextCursor,
                          QBrush, QKeyEvent, QFont, QTextOption, QPainter, QPen, QPainterPath)
@@ -3080,12 +3081,73 @@ class XLIFFEditor(QMainWindow):
                                  f"Failed to write to Excel file:\n\n{str(e)}")
 
 
+class ScreenChoiceDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Screen Selection")
+        self.setModal(True)
+        self.setFixedWidth(340)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        layout.addWidget(QLabel("Where would you like to open XLIFF2Editor?"))
+
+        self._group = QButtonGroup(self)
+        self.rb_external = QRadioButton("External screen")
+        self.rb_main = QRadioButton("Main screen")
+        self.rb_external.setChecked(True)
+        self._group.addButton(self.rb_external)
+        self._group.addButton(self.rb_main)
+        layout.addWidget(self.rb_external)
+        layout.addWidget(self.rb_main)
+
+        self.cb_remember = QCheckBox("Remember my choice and don't ask again")
+        layout.addWidget(self.cb_remember)
+
+        btn = QPushButton("OK")
+        btn.setDefault(True)
+        btn.clicked.connect(self.accept)
+        layout.addWidget(btn)
+
+    def choice(self):
+        return "external" if self.rb_external.isChecked() else "main"
+
+    def remember(self):
+        return self.cb_remember.isChecked()
+
+
+def _move_to_screen(window, screen):
+    geom = screen.availableGeometry()
+    x = geom.x() + (geom.width() - window.width()) // 2
+    y = geom.y() + (geom.height() - window.height()) // 2
+    window.move(x, y)
+
+
 def main():
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     ex = XLIFFEditor()
     ex.show()
-    ex.move_to_external_screen()
+
+    primary = QApplication.primaryScreen()
+    external = next((s for s in QApplication.screens() if s is not primary), None)
+
+    if external:
+        settings = QSettings("XLIFF2Editor", "XLIFF2Editor")
+        remembered = settings.value("screen_choice", "")
+        if remembered == "external":
+            _move_to_screen(ex, external)
+        elif remembered == "main":
+            pass
+        else:
+            dlg = ScreenChoiceDialog()
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                if dlg.remember():
+                    settings.setValue("screen_choice", dlg.choice())
+                if dlg.choice() == "external":
+                    _move_to_screen(ex, external)
+
     sys.exit(app.exec())
 
 if __name__ == '__main__':
