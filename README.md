@@ -342,7 +342,7 @@ The batch review also needs `OPENROUTER_API_KEY` in `~/config.json` (or the envi
 
 #### Match tiering
 
-Thresholds are carried over from `~/wfp_openrouter_review.py`, where they were calibrated against a 32k-entry index:
+Thresholds were calibrated against a 32k-entry index:
 
 | Tier | Requires | Presented to the model as |
 | --- | --- | --- |
