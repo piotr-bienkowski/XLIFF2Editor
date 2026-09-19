@@ -10,12 +10,13 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QTableWidget, QTableWidg
                              QProgressDialog, QStyledItemDelegate, QTextEdit, QPlainTextEdit,
                              QInputDialog, QDialog, QLabel, QLineEdit, QPushButton, QFormLayout,
                              QMenu, QColorDialog, QToolBar, QComboBox, QSizePolicy, QCheckBox,
-                             QRadioButton, QButtonGroup)
+                             QRadioButton, QButtonGroup, QSpinBox)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRect, QSize, QRegularExpression, QModelIndex, QTimer, QSettings
 from PyQt6.QtGui import (QAction, QKeySequence, QPalette, QColor, QTextDocument,
                          QAbstractTextDocumentLayout, QTextCharFormat, QTextCursor,
                          QBrush, QKeyEvent, QFont, QTextOption, QPainter, QPen, QPainterPath)
 from PyQt6.QtWidgets import QStyle
+from xml.sax.saxutils import escape as xml_escape, quoteattr
 from bs4 import BeautifulSoup, Tag, NavigableString
 from fuzzywuzzy import fuzz
 import anthropic
@@ -47,6 +48,12 @@ except ImportError:
 
 MODULE_DIR = Path(__file__).parent
 XCONFIG_PATH = MODULE_DIR / "xconfig.json"
+
+# How many reviewed segments may sit in memory before the review results are
+# flushed to disk. A review costs real money per segment, so the window that a
+# crash can destroy is kept small; the write is atomic, so a crash mid-flush
+# cannot corrupt the previous good copy either.
+REVIEW_SAVE_EVERY = 5
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
@@ -759,7 +766,11 @@ class XLIFFLoadThread(QThread):
                         'segment_node': segment,
                         'tag_map': combined_tag_map,
                         'file_id': file_id,  # Track which file this segment belongs to
-                        'locked': is_locked  # Track if segment is locked
+                        'locked': is_locked,  # Track if segment is locked
+                        'match': segment.get('match', ''),
+                        'match_origin': segment.get('match-origin', ''),
+                        'match_system': segment.get('match-system', ''),
+                        'match_percent': segment.get('match-percent', ''),
                     })
                 
                 if idx % 100 == 0:  # Update progress every 100 segments
@@ -952,6 +963,121 @@ def _filter_matches(src_text: str, trg_text: str, src_pat, trg_pat, use_and: boo
     sm, tm = hit(src_text, src_pat), hit(trg_text, trg_pat)
     return (sm and tm) if use_and else (sm or tm)
 
+# --- Tag Handling Logic ---
+#
+# The grid shows inline tags as numbered tokens the translator can move around:
+#   <1/>        a standalone tag
+#   <1>...</1>  a paired tag
+# Everything else in the cell is literal text. Because that text is the
+# translator's own writing it may legitimately contain '&', '<' or '>', and a
+# paired token may be left half-deleted, so serialisation escapes every literal
+# run and balances the tokens rather than pasting the cell into XML as-is.
+
+TAG_TOKEN_RE = re.compile(r'<(\d+)/>|</(\d+)>|<(\d+)>')
+
+
+def parse_tags_from_element(element):
+    """Convert XLIFF XML content into grid text plus a {number: tag_info} map.
+
+    Numbering runs in document order and is shared across nesting, so an inner
+    tag never reuses its parent's number.
+    """
+    if not element:
+        return "", {}
+    tag_map = {}
+    text = _parse_tag_children(element, tag_map, [0])
+    return text, tag_map
+
+
+def _parse_tag_children(element, tag_map, counter):
+    """Walk *element*'s children, numbering each tag through the shared counter."""
+    text_parts = []
+    for child in element.children:
+        if isinstance(child, NavigableString):
+            text_parts.append(str(child))
+        elif isinstance(child, Tag):
+            counter[0] += 1
+            num = counter[0]
+            tag_info = {
+                'name': child.name,
+                'attrs': child.attrs,
+                'paired': (child.name == 'pc'),
+            }
+            tag_map[num] = tag_info
+
+            if tag_info['paired']:
+                inner_text = _parse_tag_children(child, tag_map, counter)
+                text_parts.append(f"<{num}>{inner_text}</{num}>")
+            else:
+                # A standalone tag can still carry content -- memoQ keeps the
+                # original code inside <ph> -- so hold on to it; the grid has
+                # nowhere to show it and saving would otherwise drop it.
+                inner_xml = child.decode_contents()
+                if inner_xml:
+                    tag_info['inner_xml'] = inner_xml
+                text_parts.append(f"<{num}/>")
+
+    return "".join(text_parts)
+
+
+def _tag_markup(info, self_closing=False):
+    """Opening (or self-closing) markup for a tag, with attributes quoted."""
+    attrs = "".join(
+        f' {name}={quoteattr(str(value))}' for name, value in info['attrs'].items()
+    )
+    return f'<{info["name"]}{attrs}/>' if self_closing else f'<{info["name"]}{attrs}>'
+
+
+def build_xml_fragment(text, tag_map):
+    """Turn grid text with <1> tokens into a well-formed XML fragment string.
+
+    Guarantees valid XML whatever the cell holds: literal text is escaped, a
+    token naming an unknown tag or using the wrong shape for its tag stays
+    literal, an unmatched closing token stays literal, and any tag still open at
+    the end is closed.
+    """
+    out = []
+    open_stack = []
+    pos = 0
+
+    for match in TAG_TOKEN_RE.finditer(text):
+        empty_id, close_id, open_id = match.groups()
+        info = tag_map.get(int(empty_id or close_id or open_id))
+
+        if info is None:
+            continue                                  # unknown tag: literal
+        if bool(empty_id) == bool(info['paired']):
+            continue                                  # wrong shape: literal
+        if close_id and (not open_stack or open_stack[-1] != int(close_id)):
+            continue                                  # orphan closer: literal
+
+        out.append(xml_escape(text[pos:match.start()]))
+
+        if empty_id:
+            inner = info.get('inner_xml')
+            if inner:
+                out.append(_tag_markup(info))
+                out.append(inner)
+                out.append(f'</{info["name"]}>')
+            else:
+                out.append(_tag_markup(info, self_closing=True))
+        elif open_id:
+            out.append(_tag_markup(info))
+            open_stack.append(int(open_id))
+        else:
+            out.append(f'</{info["name"]}>')
+            open_stack.pop()
+
+        pos = match.end()
+
+    out.append(xml_escape(text[pos:]))
+
+    while open_stack:
+        out.append(f'</{tag_map[open_stack.pop()]["name"]}>')
+
+    return "".join(out)
+
+
 class XLIFFEditor(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -974,6 +1100,10 @@ class XLIFFEditor(QMainWindow):
         self.font_size = 10  # Default font size
         self.underline_color = QColor(57, 255, 20)  # Default fluorescent green
         self.current_theme = "dark"  # overwritten after init_ui by detect_system_theme()
+
+        # Sort state: _sort_col is None for natural (load) order, or a column index
+        self._sort_col = None
+        self._sort_order = Qt.SortOrder.AscendingOrder
 
         self.load_xconfig()
         self.ai_provider = self.xconfig['settings'].get('ai_provider', 'Claude')
@@ -1059,6 +1189,32 @@ class XLIFFEditor(QMainWindow):
             act.triggered.connect(callback)
             mqxliff_menu.addAction(act)
 
+        # Phrase (Memsource) submenu
+        mxliff_menu = file_menu.addMenu("Phrase (Memsource)")
+        mxliff_actions = [
+            ("Import from Phrase (MXLIFF)...", None, self.import_from_mxliff),
+            ("Export to Phrase (MXLIFF)...", None, self.export_to_mxliff),
+        ]
+        for name, shortcut, callback in mxliff_actions:
+            act = QAction(name, self)
+            if shortcut:
+                act.setShortcut(QKeySequence(shortcut))
+            act.triggered.connect(callback)
+            mxliff_menu.addAction(act)
+
+        # Wordfast Pro submenu
+        wfp_menu = file_menu.addMenu("Wordfast Pro")
+        wfp_actions = [
+            ("Import from TXLF...", None, self.import_from_txlf),
+            ("Export to TXLF...",   None, self.export_to_txlf),
+        ]
+        for name, shortcut, callback in wfp_actions:
+            act = QAction(name, self)
+            if shortcut:
+                act.setShortcut(QKeySequence(shortcut))
+            act.triggered.connect(callback)
+            wfp_menu.addAction(act)
+
         # Excel submenu
         excel_menu = file_menu.addMenu("Excel")
         excel_actions = [
@@ -1071,6 +1227,19 @@ class XLIFFEditor(QMainWindow):
                 act.setShortcut(QKeySequence(shortcut))
             act.triggered.connect(callback)
             excel_menu.addAction(act)
+
+        # SRT-tab submenu
+        srt_menu = file_menu.addMenu("SRT")
+        srt_actions = [
+            ("Import from SRT-tab...", None, self.import_from_srt),
+            ("Export to SRT-tab...",   None, self.export_to_srt),
+        ]
+        for name, shortcut, callback in srt_actions:
+            act = QAction(name, self)
+            if shortcut:
+                act.setShortcut(QKeySequence(shortcut))
+            act.triggered.connect(callback)
+            srt_menu.addAction(act)
 
         file_menu.addSeparator()
         
@@ -1105,7 +1274,11 @@ class XLIFFEditor(QMainWindow):
             ("Copy Source to Target", "Alt+S", self.copy_source_to_target),
             ("Copy All Sources to Targets", "Ctrl+Shift+C", self.copy_all_sources_to_targets),
             (None, None, None),
+            ("Leverage from Xliff…", None, self.leverage_from_xliff),
+            (None, None, None),
             ("Edit Languages", "Ctrl+Shift+L", self.edit_languages),
+            (None, None, None),
+            ("HybridTM Batch Review…", None, self.hybridtm_batch_review),
             (None, None, None),
             ("AI Translate Current", "Ctrl+Shift+A", self.ai_translate_current),
             ("AI Translate All Initial", "Ctrl+Shift+T", self.ai_translate_all_initial),
@@ -1181,7 +1354,12 @@ class XLIFFEditor(QMainWindow):
         self.filter_target.returnPressed.connect(self.apply_filter)
         filter_layout.addWidget(self.filter_target)
         self.filter_logic = QComboBox()
-        self.filter_logic.addItems(["AND", "OR"])
+        self.filter_logic.addItems(["AND", "OR", ""])
+        self.filter_logic.setToolTip(
+            "AND: both fields must match\n"
+            "OR: either field matches\n"
+            "(blank): single-field mode — fill one field, leave the other empty"
+        )
         filter_layout.addWidget(self.filter_logic)
         self.filter_regex = QCheckBox("Regex")
         filter_layout.addWidget(self.filter_regex)
@@ -1199,13 +1377,15 @@ class XLIFFEditor(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         
         self.table = QTableWidget()
-        self.table.setColumnCount(5)  # Add column for File
-        self.table.setHorizontalHeaderLabels(["ID", "File", "Source", "Target", "Status"])
+        self.table.setColumnCount(6)  # ID, File, Source, Target, Status, Match
+        self.table.setHorizontalHeaderLabels(["ID", "File", "Source", "Target", "Status", "Match"])
         self.table.setItemDelegateForColumn(2, RichTextDelegate(self))  # Source is now column 2
         self.table.setItemDelegateForColumn(3, RichTextDelegate(self))  # Target is now column 3
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)  # Source
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)  # Target
         self.table.setColumnWidth(1, 28)  # File column — icon only
+        self.table.setColumnWidth(5, 60)  # Match column — short label
+        self.table.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
         self.table.setWordWrap(True)
         # Fixed mode with lazy per-row sizing: _resize_visible_rows() sizes only viewport rows on demand.
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
@@ -1225,10 +1405,18 @@ class XLIFFEditor(QMainWindow):
         self.table.currentCellChanged.connect(self.on_cell_changed)
         splitter.addWidget(self.table)
         
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(2)
+        self.tm_label = QLabel("TM / Glossary")
+        self.tm_label.setStyleSheet("padding: 2px 4px; font-size: 10px; color: gray;")
+        right_layout.addWidget(self.tm_label)
         self.tm_list = QListWidget()
         self.tm_list.itemDoubleClicked.connect(self.insert_tm_match)
         self.tm_list.itemClicked.connect(self.on_list_item_clicked)
-        splitter.addWidget(self.tm_list)
+        right_layout.addWidget(self.tm_list)
+        splitter.addWidget(right_panel)
         
         splitter.setStretchFactor(0, 4)
         main_layout.addWidget(splitter, stretch=1)
@@ -1247,6 +1435,9 @@ class XLIFFEditor(QMainWindow):
                 "ai_provider": "Claude",
                 "glossary_file": "",
                 "propagate_identical": True,
+                "hybridtm_instance": "",
+                "hybridtm_model": "google/gemini-2.5-flash-lite",
+                "hybridtm_domain": "",
             },
             "recent_files": [],
             "contexts": [],
@@ -1647,69 +1838,15 @@ class XLIFFEditor(QMainWindow):
 
     def parse_content_with_tags(self, element):
         """Converts XLIFF XML content into text with simplified <1> tokens."""
-        if not element: return "", {}
-        
-        text_parts = []
-        tag_map = {}
-        tag_counter = 1
-
-        for child in element.children:
-            if isinstance(child, NavigableString):
-                text_parts.append(str(child))
-            elif isinstance(child, Tag):
-                num = tag_counter
-                tag_counter += 1
-                
-                # Store original data
-                tag_info = {
-                    'name': child.name,
-                    'attrs': child.attrs,
-                    'paired': (child.name == 'pc')
-                }
-                tag_map[num] = tag_info
-                
-                if tag_info['paired']:
-                    inner_text, inner_map = self.parse_content_with_tags(child)
-                    # Merge inner maps if any (though XLIFF 2.2 usually flat)
-                    for k, v in inner_map.items():
-                        tag_map[tag_counter] = v
-                        tag_counter += 1
-                    text_parts.append(f"<{num}>{inner_text}</{num}>")
-                else:
-                    text_parts.append(f"<{num}/>")
-        
-        return "".join(text_parts), tag_map
+        return parse_tags_from_element(element)
 
     def serialize_to_xml(self, text, tag_map, soup):
         """Converts grid text with <1> tokens back into XLIFF XML nodes."""
-        # Sort keys descending to avoid replacing <10> with <1>0
-        sorted_keys = sorted(tag_map.keys(), reverse=True)
-        
-        current_xml = text
-        for k in sorted_keys:
-            info = tag_map[k]
-            if info['paired']:
-                # Replace <k> and </k> for paired tags
-                # Using temp placeholders to avoid collision
-                attr_str = " ".join([f'{a}="{v}"' for a, v in info['attrs'].items()])
-                if attr_str:
-                    attr_str = " " + attr_str  # Add space before attributes
-                current_xml = current_xml.replace(f"<{k}>", f"TEMP_START_{k}")
-                current_xml = current_xml.replace(f"</{k}>", f"TEMP_END_{k}")
-                current_xml = current_xml.replace(f"TEMP_START_{k}", f'<{info["name"]}{attr_str}>')
-                current_xml = current_xml.replace(f"TEMP_END_{k}", f'</{info["name"]}>')
-            else:
-                # Replace <k/> for unpaired tags
-                attr_str = " ".join([f'{a}="{v}"' for a, v in info['attrs'].items()])
-                if attr_str:
-                    attr_str = " " + attr_str  # Add space before attributes
-                current_xml = current_xml.replace(f"<{k}/>", f'<{info["name"]}{attr_str}/>')
-        
-        # Create a temporary soup to parse this string back into a set of nodes
+        fragment_xml = build_xml_fragment(text, tag_map)
         try:
-            fragment = BeautifulSoup(f"<root>{current_xml}</root>", 'xml')
+            fragment = BeautifulSoup(f"<root>{fragment_xml}</root>", 'xml')
             return fragment.root.contents
-        except:
+        except Exception:
             return [soup.new_string(text)]
 
     # --- UI Actions ---
@@ -1746,8 +1883,16 @@ class XLIFFEditor(QMainWindow):
     
     def on_xliff_loaded(self, xliff_soup, segments, filepath):
         self.xliff_soup = xliff_soup
+        # Tag each segment with its natural load-order index so a sort can be
+        # cycled back to the original order later.
+        for i, seg in enumerate(segments):
+            seg['_orig_idx'] = i
         self.segments = segments
         self.xliff_file = filepath
+        # New file → reset sort state
+        self._sort_col = None
+        self._sort_order = Qt.SortOrder.AscendingOrder
+        self.table.horizontalHeader().setSortIndicatorShown(False)
         
         # Add to recent files
         self.add_recent_file(filepath)
@@ -1760,6 +1905,7 @@ class XLIFFEditor(QMainWindow):
         else:
             self.src_lang = 'unknown'
             self.trg_lang = None
+        self._update_tm_label()
         
         self.populate_table()
         self.update_window_title()
@@ -1834,10 +1980,86 @@ class XLIFFEditor(QMainWindow):
                 # Make text gray to indicate locked status
                 status_item.setForeground(QColor(150, 150, 150))
             self.table.setItem(row, 4, status_item)
-            
+
+            # Column 5: Match (TM/MT origin — read-only, populated from SDLXLIFF import)
+            match_label = seg.get('match', '')
+            match_item = QTableWidgetItem(match_label)
+            match_item.setFlags(Qt.ItemFlag.ItemIsEnabled)  # Read-only
+            match_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            origin = seg.get('match_origin', '')
+            system = seg.get('match_system', '')
+            percent = seg.get('match_percent', '')
+            tip_parts = []
+            if origin:
+                tip_parts.append(f"origin: {origin}")
+            if system:
+                tip_parts.append(f"system: {system}")
+            if percent:
+                tip_parts.append(f"percent: {percent}")
+            if tip_parts:
+                match_item.setToolTip("\n".join(tip_parts))
+            self.table.setItem(row, 5, match_item)
+
         self.table.itemChanged.connect(self.on_item_changed)
         self.clear_filter()
         QTimer.singleShot(0, self._resize_visible_rows)
+
+    @staticmethod
+    def _match_numeric_value(label):
+        """Convert a match label ('100%', 'CM', 'MT', ...) to a numeric sort key.
+        No-match and machine translation both count as 0."""
+        if label.endswith('%'):
+            try:
+                return int(label[:-1])
+            except ValueError:
+                return 0
+        # CM (Context Match) is stricter than a plain 100% match; AP/HT are
+        # effectively 100. Src/MT/(blank) all count as 0.
+        return {'CM': 101, 'AP': 100, 'HT': 100}.get(label, 0)
+
+    def _on_header_clicked(self, col):
+        # Only the Match column (5) is sortable for now.
+        if col != 5 or not self.segments:
+            return
+        if self._sort_col is None:
+            self._sort_col = col
+            self._sort_order = Qt.SortOrder.AscendingOrder
+        elif self._sort_col == col and self._sort_order == Qt.SortOrder.AscendingOrder:
+            self._sort_order = Qt.SortOrder.DescendingOrder
+        elif self._sort_col == col and self._sort_order == Qt.SortOrder.DescendingOrder:
+            # Cycle back to natural (load) order
+            self._sort_col = None
+        else:
+            self._sort_col = col
+            self._sort_order = Qt.SortOrder.AscendingOrder
+        self._apply_current_sort()
+
+    def _apply_current_sort(self):
+        if self._sort_col == 5:
+            key = lambda seg: XLIFFEditor._match_numeric_value(seg.get('match', ''))
+            reverse = (self._sort_order == Qt.SortOrder.DescendingOrder)
+        else:
+            key = lambda seg: seg.get('_orig_idx', 0)
+            reverse = False
+
+        # Preserve filter fields across the repopulation
+        src_filter_text = self.filter_source.text()
+        trg_filter_text = self.filter_target.text()
+
+        self.segments.sort(key=key, reverse=reverse)
+        self.populate_table()  # clear_filter inside will blank the filter fields
+
+        if src_filter_text or trg_filter_text:
+            self.filter_source.setText(src_filter_text)
+            self.filter_target.setText(trg_filter_text)
+            self.apply_filter()
+
+        header = self.table.horizontalHeader()
+        if self._sort_col is not None:
+            header.setSortIndicator(self._sort_col, self._sort_order)
+            header.setSortIndicatorShown(True)
+        else:
+            header.setSortIndicatorShown(False)
 
     def apply_filter(self):
         src_text = self.filter_source.text()
@@ -2088,6 +2310,19 @@ class XLIFFEditor(QMainWindow):
             self.current_row = row
             self.search_tm(self.segments[row]['source'])
 
+    def _update_tm_label(self):
+        src = self.src_lang or "?"
+        trg = self.trg_lang or "—"
+        self.tm_label.setText(f"TM / Glossary  [{src} → {trg}]")
+
+    def _refresh_active_editor_spellcheck(self):
+        """Force the active target-cell editor to reopen so it picks up the new spell checker language."""
+        idx = self.table.currentIndex()
+        if idx.isValid() and idx.column() == 3:
+            from PyQt6.QtCore import QModelIndex
+            self.table.setCurrentIndex(QModelIndex())
+            self.table.setCurrentIndex(idx)
+
     def set_target_language(self):
         """Allow user to set or change the target language"""
         if not self.xliff_soup:
@@ -2135,7 +2370,9 @@ class XLIFFEditor(QMainWindow):
                 self.trg_lang = lang_code
                 self.is_modified = True
                 self.update_window_title()
-                QMessageBox.information(self, "Target Language Set", 
+                self._update_tm_label()
+                self._refresh_active_editor_spellcheck()
+                QMessageBox.information(self, "Target Language Set",
                                       f"Target language set to: {lang_code}")
             else:
                 QMessageBox.critical(self, "Error", "Could not find XLIFF root element")
@@ -2230,7 +2467,9 @@ class XLIFFEditor(QMainWindow):
                 
                 self.is_modified = True
                 self.update_window_title()
-                
+                self._update_tm_label()
+                self._refresh_active_editor_spellcheck()
+
                 msg = f"Languages updated:\nSource: {src_code}"
                 if trg_code:
                     msg += f"\nTarget: {trg_code}"
@@ -2251,6 +2490,7 @@ class XLIFFEditor(QMainWindow):
         self.xliff_soup = None
         self.src_lang = None
         self.trg_lang = None
+        self._update_tm_label()
         self.setWindowTitle("Xliff 2 Editor")
 
     def closeEvent(self, event):
@@ -2314,8 +2554,71 @@ class XLIFFEditor(QMainWindow):
         self.tmx_progress.close()
         QMessageBox.critical(self, "Error", f"Failed to load TMX: {error_msg}")
 
+    def _hybridtm_client(self):
+        """Shared HybridTM client, or None when no instance is configured."""
+        instance = self.xconfig['settings'].get('hybridtm_instance', '')
+        if not instance:
+            return None
+        if getattr(self, '_htm_client', None) is not None \
+                and self._htm_client.instance == instance:
+            return self._htm_client
+        try:
+            import hybridtm_client
+        except ImportError:
+            return None
+        self._htm_client = hybridtm_client.HybridTMClient(instance)
+        return self._htm_client
+
+    def _start_hybridtm_lookup(self, row, text):
+        """Query HybridTM for the selected row without blocking the UI."""
+        client = self._hybridtm_client()
+        if client is None or not text.strip():
+            return
+        try:
+            from tm_review_ui import HybridTMLookupThread
+        except ImportError:
+            return
+        # Only the newest lookup may write to the list; selecting rows quickly
+        # would otherwise let a slow earlier search overwrite the current one.
+        self._htm_lookup_row = row
+        previous = getattr(self, '_htm_thread', None)
+        if previous is not None and previous.isRunning():
+            previous.requestInterruption()
+        thread = HybridTMLookupThread(
+            client, row, text, self.src_lang or 'en-US', self.trg_lang or 'pl-PL')
+        thread.done.connect(self._on_hybridtm_matches)
+        thread.failed.connect(self._on_hybridtm_failed)
+        self._htm_thread = thread
+        thread.start()
+
+    def _on_hybridtm_matches(self, row, matches):
+        if row != getattr(self, '_htm_lookup_row', -1) or row != self.current_row:
+            return
+        if not matches:
+            return
+        sep = QListWidgetItem("── HybridTM ──")
+        sep.setFlags(Qt.ItemFlag.NoItemFlags)
+        sep.setForeground(QColor(120, 120, 120))
+        self.tm_list.addItem(sep)
+        for match in matches:
+            label = f"{match['best_fuzzy']}% / sem {match['semantic']}% — {match['target']}"
+            item = QListWidgetItem(label)
+            item.setToolTip(f"EN: {match['source']}\nPL: {match['target']}")
+            item.setData(Qt.ItemDataRole.UserRole,
+                         {'type': 'tm', 'translation': match['target']})
+            self.tm_list.addItem(item)
+
+    def _on_hybridtm_failed(self, row, message):
+        if row != self.current_row:
+            return
+        item = QListWidgetItem(f"── HybridTM unavailable: {message.splitlines()[0]} ──")
+        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        item.setForeground(QColor(150, 110, 110))
+        self.tm_list.addItem(item)
+
     def search_tm(self, text):
         self.tm_list.clear()
+        self._start_hybridtm_lookup(self.current_row, text)
 
         # TM matches — sorted by score descending
         tm_hits = sorted(
@@ -2432,6 +2735,22 @@ class XLIFFEditor(QMainWindow):
                 self.table.item(row, 4).setText("initial")  # Column 4 is now Status
                 self.segments[row]['target'] = ""
                 self.segments[row]['state'] = "initial"
+
+                # Clear match column and its underlying metadata (target is gone
+                # → its TM/MT origin no longer applies)
+                match_item = self.table.item(row, 5)
+                if match_item is not None:
+                    match_item.setText("")
+                    match_item.setToolTip("")
+                self.segments[row]['match'] = ""
+                self.segments[row]['match_origin'] = ""
+                self.segments[row]['match_system'] = ""
+                self.segments[row]['match_percent'] = ""
+                seg_node = self.segments[row].get('segment_node')
+                if seg_node is not None:
+                    for attr in ('match', 'match-origin', 'match-system', 'match-percent'):
+                        if seg_node.has_attr(attr):
+                            del seg_node[attr]
                 cleared_count += 1
 
                 # Update progress every 10 rows
@@ -2545,10 +2864,716 @@ class XLIFFEditor(QMainWindow):
             self.table.itemChanged.connect(self.on_item_changed)
             progress.close()
 
+    # Strips <N>, </N>, <N/> placeholder tag tokens used in grid text
+    _TAG_TOKEN_RE = re.compile(r'</?\d+/?>')
+
+    # Inline tag names recognised for the tagged-leverage transfer.
+    _LEV_PAIRED_TAGS = {'g', 'pc'}      # SDLXLIFF g / XLIFF 2.x pc
+    _LEV_UNPAIRED_TAGS = {'x', 'ph'}    # SDLXLIFF x / XLIFF 2.x ph
+    _LEV_TRANSPARENT_TAGS = {'mrk'}     # segmentation wrappers — walk through
+
+    def _leverage_walk_source(self, element):
+        """Walk a leverage source element, building a paired/unpaired signature
+        (in source order) and an id → (kind, ordinal) map. Raises ValueError on
+        an unsupported tag (bpt/ept/it/sub/…)."""
+        from lxml import etree as _et
+        sig = []
+        id_map = {}
+        counter = [1]
+
+        def walk(el):
+            for child in el:
+                local = _et.QName(child).localname
+                if local in self._LEV_PAIRED_TAGS:
+                    n = counter[0]; counter[0] += 1
+                    sig.append('paired')
+                    cid = child.get('id')
+                    if cid is not None:
+                        id_map[cid] = ('paired', n)
+                    walk(child)
+                elif local in self._LEV_UNPAIRED_TAGS:
+                    n = counter[0]; counter[0] += 1
+                    sig.append('unpaired')
+                    cid = child.get('id')
+                    if cid is not None:
+                        id_map[cid] = ('unpaired', n)
+                elif local in self._LEV_TRANSPARENT_TAGS:
+                    walk(child)
+                else:
+                    raise ValueError(f"Unsupported source tag: {local}")
+
+        walk(element)
+        return sig, id_map
+
+    def _leverage_walk_target(self, element, src_id_map):
+        """Walk a leverage target element, emitting grid-form text (<N>…</N>,
+        <N/>) using src_id_map to number tags by their SOURCE-side ordinal.
+        Raises ValueError on unsupported tag, unknown id, or kind mismatch."""
+        from lxml import etree as _et
+        parts = []
+
+        def walk(el):
+            if el.text:
+                parts.append(el.text)
+            for child in el:
+                local = _et.QName(child).localname
+                if local in self._LEV_PAIRED_TAGS:
+                    cid = child.get('id')
+                    if cid is None or cid not in src_id_map:
+                        raise ValueError(f"Target paired tag id {cid!r} not in source id map")
+                    kind, n = src_id_map[cid]
+                    if kind != 'paired':
+                        raise ValueError(f"Kind mismatch for id {cid!r}: source={kind}, target=paired")
+                    parts.append(f'<{n}>')
+                    walk(child)
+                    parts.append(f'</{n}>')
+                elif local in self._LEV_UNPAIRED_TAGS:
+                    cid = child.get('id')
+                    if cid is None or cid not in src_id_map:
+                        raise ValueError(f"Target unpaired tag id {cid!r} not in source id map")
+                    kind, n = src_id_map[cid]
+                    if kind != 'unpaired':
+                        raise ValueError(f"Kind mismatch for id {cid!r}: source={kind}, target=unpaired")
+                    parts.append(f'<{n}/>')
+                elif local in self._LEV_TRANSPARENT_TAGS:
+                    walk(child)
+                else:
+                    raise ValueError(f"Unsupported target tag: {local}")
+                if child.tail:
+                    parts.append(child.tail)
+
+        walk(element)
+        return ''.join(parts)
+
+    def _current_source_signature(self, seg):
+        """Return the paired/unpaired signature of the current segment's source,
+        derived from its tag_map (which is populated in source-appearance order
+        by parse_content_with_tags)."""
+        tag_map = seg.get('tag_map') or {}
+        sig = []
+        for k in sorted(tag_map.keys()):
+            info = tag_map[k]
+            sig.append('paired' if info.get('paired') else 'unpaired')
+        return sig
+
+    def _extract_leverage_pairs(self, filepath):
+        """Read an SDLXLIFF (XLIFF 1.2) or XLIFF 2.x file and return
+        {source_text_no_tags: entry} where entry is a dict with:
+          - 'plain_target': tag-stripped target text (fallback)
+          - 'source_sig':   paired/unpaired signature of leverage source
+                            (None if the pair contains unsupported tags)
+          - 'tagged_target': grid-form target using SOURCE-order numbering
+                            (None if tag transfer not possible for this pair)
+        Only pairs where both source and target are non-empty are kept."""
+        from lxml import etree as _et
+        tree = _et.parse(filepath)
+        root = tree.getroot()
+        ns = _et.QName(root).namespace or ''
+
+        pairs = {}
+
+        def process_pair(src_elem, tgt_elem):
+            if src_elem is None or tgt_elem is None:
+                return
+            src_text = ''.join(src_elem.itertext()).strip()
+            tgt_text = ''.join(tgt_elem.itertext()).strip()
+            if not src_text or not tgt_text:
+                return
+            entry = {
+                'plain_target': tgt_text,
+                'source_sig': None,
+                'tagged_target': None,
+            }
+            try:
+                sig, id_map = self._leverage_walk_source(src_elem)
+                tagged = self._leverage_walk_target(tgt_elem, id_map)
+                entry['source_sig'] = sig
+                entry['tagged_target'] = tagged
+            except ValueError:
+                pass  # keep plain_target only
+            pairs[src_text] = entry
+
+        XL12 = 'urn:oasis:names:tc:xliff:document:1.2'
+        if ns == XL12:
+            for tu in root.findall(f'.//{{{XL12}}}trans-unit'):
+                seg_source = tu.find(f'{{{XL12}}}seg-source')
+                target = tu.find(f'{{{XL12}}}target')
+                if seg_source is not None and target is not None:
+                    src_mrks = {m.get('mid'): m
+                                for m in seg_source.findall(f'.//{{{XL12}}}mrk[@mtype="seg"]')
+                                if m.get('mid')}
+                    tgt_mrks = {m.get('mid'): m
+                                for m in target.findall(f'.//{{{XL12}}}mrk[@mtype="seg"]')
+                                if m.get('mid')}
+                    for mid, src_mrk in src_mrks.items():
+                        tgt_mrk = tgt_mrks.get(mid)
+                        if tgt_mrk is not None:
+                            process_pair(src_mrk, tgt_mrk)
+                elif target is not None:
+                    source = tu.find(f'{{{XL12}}}source')
+                    process_pair(source, target)
+        elif ns.startswith('urn:oasis:names:tc:xliff:document:2'):
+            for seg in root.findall(f'.//{{{ns}}}segment'):
+                source = seg.find(f'{{{ns}}}source')
+                target = seg.find(f'{{{ns}}}target')
+                process_pair(source, target)
+        else:
+            raise ValueError(
+                f"Unsupported XLIFF namespace: {ns!r}. "
+                "Only SDLXLIFF (XLIFF 1.2) and XLIFF 2.x are supported."
+            )
+        return pairs
+
+    def leverage_from_xliff(self):
+        """Leverage translations from another SDLXLIFF or XLIFF 2.x file.
+        For each unlocked, untranslated segment in the currently open file,
+        find an exact or fuzzy source-text match (tags stripped) in the
+        leverage file and insert its target as plain text."""
+        if not self.segments:
+            QMessageBox.warning(self, "No File", "Please open an XLIFF file first.")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Leverage from XLIFF")
+        layout = QVBoxLayout(dlg)
+
+        form = QFormLayout()
+        file_edit = QLineEdit()
+        file_edit.setMinimumWidth(420)
+        browse_btn = QPushButton("Browse…")
+
+        def _browse():
+            f, _ = QFileDialog.getOpenFileName(
+                dlg, "Select leverage XLIFF file", "",
+                "XLIFF files (*.sdlxliff *.xlf *.xliff);;All files (*)"
+            )
+            if f:
+                file_edit.setText(f)
+
+        browse_btn.clicked.connect(_browse)
+        file_row_widget = QWidget()
+        file_row_layout = QHBoxLayout(file_row_widget)
+        file_row_layout.setContentsMargins(0, 0, 0, 0)
+        file_row_layout.addWidget(file_edit)
+        file_row_layout.addWidget(browse_btn)
+        form.addRow("Leverage file:", file_row_widget)
+
+        threshold_spin = QSpinBox()
+        threshold_spin.setRange(1, 100)
+        threshold_spin.setValue(70)
+        threshold_spin.setSuffix("%")
+        form.addRow("Minimum fuzzy match:", threshold_spin)
+
+        layout.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        ok_btn = QPushButton("Leverage")
+        cancel_btn = QPushButton("Cancel")
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(dlg.accept)
+        cancel_btn.clicked.connect(dlg.reject)
+        btn_row.addWidget(ok_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        file_path = file_edit.text().strip()
+        threshold = threshold_spin.value()
+        if not file_path:
+            QMessageBox.warning(self, "No File", "Please select a leverage file.")
+            return
+
+        try:
+            pairs = self._extract_leverage_pairs(file_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Load Error",
+                                 f"Could not read leverage file:\n{e}")
+            return
+        if not pairs:
+            QMessageBox.information(self, "No Data",
+                "The leverage file contains no usable source/target pairs.")
+            return
+
+        import os as _os
+        system_label = _os.path.basename(file_path)
+        total = len(self.segments)
+
+        progress = QProgressDialog("Leveraging translations…", "Cancel", 0, total, self)
+        progress.setWindowTitle("Leverage from XLIFF")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.show()
+
+        self.table.itemChanged.disconnect()
+        exact_tagged = 0    # exact match, tags transferred from leverage target
+        exact_plain = 0     # exact match, fell back to plain text (tag mismatch)
+        fuzzy_count = 0     # fuzzy match, always plain text
+        skipped_locked = 0
+        skipped_has_target = 0
+
+        try:
+            for row in range(total):
+                if progress.wasCanceled():
+                    break
+                if self.table.isRowHidden(row):
+                    continue
+                seg = self.segments[row]
+                if seg.get('locked', False):
+                    skipped_locked += 1
+                    continue
+                if seg.get('target', '').strip():
+                    skipped_has_target += 1
+                    continue
+
+                src = self._TAG_TOKEN_RE.sub('', seg.get('source', '')).strip()
+                if not src:
+                    continue
+
+                # Exact match first (fast dict lookup)
+                if src in pairs:
+                    entry = pairs[src]
+                    current_sig = self._current_source_signature(seg)
+                    if (entry['source_sig'] is not None
+                            and entry['tagged_target'] is not None
+                            and entry['source_sig'] == current_sig):
+                        target_text = entry['tagged_target']
+                        exact_tagged += 1
+                    else:
+                        target_text = entry['plain_target']
+                        exact_plain += 1
+                    percent = 100
+                else:
+                    best_score = 0
+                    best_entry = None
+                    for k, ent in pairs.items():
+                        score = fuzz.ratio(src, k)
+                        if score > best_score:
+                            best_score = score
+                            best_entry = ent
+                            if score == 100:
+                                break
+                    if best_score >= threshold and best_entry is not None:
+                        target_text = best_entry['plain_target']
+                        percent = best_score
+                        fuzzy_count += 1
+                    else:
+                        if row % 20 == 0:
+                            progress.setValue(row + 1)
+                            QApplication.processEvents()
+                        continue
+
+                self.table.item(row, 3).setText(target_text)
+                self.table.item(row, 4).setText("translated")
+                seg['target'] = target_text
+                seg['state'] = "translated"
+
+                match_label = f"{percent}%"
+                match_item = self.table.item(row, 5)
+                if match_item is not None:
+                    match_item.setText(match_label)
+                    match_item.setToolTip(
+                        f"origin: leverage\nsystem: {system_label}\npercent: {percent}"
+                    )
+                seg['match'] = match_label
+                seg['match_origin'] = 'leverage'
+                seg['match_system'] = system_label
+                seg['match_percent'] = str(percent)
+
+                node = seg.get('segment_node')
+                if node is not None:
+                    node['match'] = match_label
+                    node['match-origin'] = 'leverage'
+                    node['match-system'] = system_label
+                    node['match-percent'] = str(percent)
+
+                if row % 20 == 0:
+                    progress.setValue(row + 1)
+                    QApplication.processEvents()
+
+            progress.setValue(total)
+            self.is_modified = True
+        finally:
+            self.table.itemChanged.connect(self.on_item_changed)
+
+        QMessageBox.information(
+            self, "Leverage Complete",
+            f"Leverage file: {system_label}\n"
+            f"Leverage entries: {len(pairs)}\n\n"
+            f"Exact matches (100%) — tags transferred: {exact_tagged}\n"
+            f"Exact matches (100%) — plain text (tag mismatch): {exact_plain}\n"
+            f"Fuzzy matches (≥{threshold}%) — plain text: {fuzzy_count}\n"
+            f"Skipped (locked): {skipped_locked}\n"
+            f"Skipped (already translated): {skipped_has_target}\n\n"
+            "Tags are transferred only for exact matches where current source and "
+            "leverage source have identical tag counts and paired/unpaired pattern. "
+            "All other insertions are plain text."
+        )
+
     def set_current_translated(self):
         if self.current_row >= 0:
             self.table.item(self.current_row, 4).setText("translated")  # Column 4 is now Status
             self.segments[self.current_row]['state'] = "translated"
+
+    def hybridtm_batch_review(self):
+        """Review existing translations against a HybridTM instance plus an LLM."""
+        if not self.segments:
+            QMessageBox.warning(self, "No File", "Please open an XLIFF file first.")
+            return
+
+        try:
+            import hybridtm_client
+            import tm_review
+            from tm_review_ui import (TMReviewSetupDialog, TMReviewResultsDialog,
+                                      TMReviewThread)
+        except ImportError as exc:
+            QMessageBox.critical(
+                self, "Module Missing",
+                f"The HybridTM review modules are not available:\n\n{exc}\n\n"
+                "hybridtm_client.py, tm_review.py and tm_review_ui.py must sit "
+                "beside this editor, and the 'openai' package must be installed."
+            )
+            return
+
+        api_key = tm_review.load_openrouter_key()
+        if not api_key:
+            QMessageBox.warning(
+                self, "No OpenRouter Key",
+                "OPENROUTER_API_KEY was not found in ~/config.json or the "
+                "environment.\n\nThe review is billed through OpenRouter."
+            )
+            return
+
+        # A previous run may have been interrupted after real money was spent.
+        resume_rows = {}
+        saved = self._load_review_results()
+        if saved:
+            reply = QMessageBox.question(
+                self, "Unfinished Review Found",
+                f"A review of this file from {saved.get('saved_at', 'earlier')} "
+                f"was never applied — {len(saved['results'])} flagged segment(s).\n\n"
+                "Reopen those results instead of starting a new review?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+            if reply == QMessageBox.StandardButton.Yes:
+                self._review_results = saved['results']
+                self._review_all = dict(saved.get('reviewed_rows') or {})
+                self._show_review_results(
+                    saved.get('reviewed') or len(saved['results']),
+                    saved.get('usage_summary', ''), TMReviewResultsDialog)
+                return
+            resume_rows = saved.get('reviewed_rows') or {}
+            self._clear_review_results()
+
+        settings = self.xconfig['settings']
+
+        # Offer whatever instances the server knows about; a server that is not
+        # running simply yields an empty list and the field stays free-text.
+        instances = []
+        try:
+            probe = hybridtm_client.HybridTMClient(settings.get('hybridtm_instance') or 'none')
+            if probe.server_running():
+                instances = [i.get('name', '') for i in probe.list_instances()]
+        except Exception:  # noqa: BLE001 - discovery is best-effort
+            pass
+
+        counts = {
+            'unconfirmed': len(self._review_jobs('unconfirmed', True)),
+            'translated': len(self._review_jobs('translated', True)),
+            'visible': len(self._review_jobs('visible', True)),
+        }
+
+        dialog = TMReviewSetupDialog(
+            self, instances=instances,
+            instance=settings.get('hybridtm_instance', ''),
+            model=settings.get('hybridtm_model', ''),
+            domain=settings.get('hybridtm_domain', ''),
+            src_lang=self.src_lang or 'en-US',
+            tgt_lang=self.trg_lang or 'pl-PL',
+            counts=counts,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        params = dialog.values()
+        if not params['instance']:
+            QMessageBox.warning(self, "No Instance",
+                                "Choose a HybridTM instance to review against.")
+            return
+
+        settings['hybridtm_instance'] = params['instance']
+        settings['hybridtm_model'] = params['model']
+        settings['hybridtm_domain'] = params['domain']
+        self.save_xconfig()
+
+        jobs = self._review_jobs(params['scope'], params['skip_locked'])
+
+        # Segments an interrupted run already judged are not paid for twice.
+        if resume_rows:
+            already = {row for row in resume_rows if row < len(self.segments)}
+            remaining = [job for job in jobs if job[0] not in already]
+            if remaining and len(remaining) < len(jobs):
+                reply = QMessageBox.question(
+                    self, "Resume Previous Review",
+                    f"{len(jobs) - len(remaining)} of these {len(jobs)} segments were "
+                    f"already reviewed by the interrupted run.\n\n"
+                    f"Skip them and review only the remaining {len(remaining)}?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    jobs = remaining
+                    self._review_all = {int(row): result
+                                        for row, result in resume_rows.items()}
+                    self._review_results = [
+                        (int(row), result) for row, result in sorted(resume_rows.items())
+                        if result.get('verdict') != 'OK']
+
+        if not jobs:
+            QMessageBox.information(
+                self, "Nothing to Review",
+                "No segment in that scope has a translation to review."
+            )
+            return
+
+        client = hybridtm_client.HybridTMClient(params['instance'])
+        self._review_results = getattr(self, '_review_results', None) or []
+        self._review_all = getattr(self, '_review_all', None) or {}
+        self._review_unsaved = 0
+
+        self.review_progress = QProgressDialog(
+            "Searching translation memory...", "Cancel", 0, len(jobs), self)
+        self.review_progress.setWindowTitle("HybridTM Batch Review")
+        self.review_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self.review_progress.setValue(0)
+
+        self.review_thread = TMReviewThread(
+            client, jobs, params['src_lang'], params['tgt_lang'],
+            api_key, params['model'] or tm_review.DEFAULT_MODEL,
+            params['domain'], self.glossary,
+        )
+        self.review_progress.canceled.connect(self.review_thread.cancel)
+        self.review_thread.progress.connect(self._on_review_progress)
+        self.review_thread.reviewed.connect(self._on_segment_reviewed)
+        # Queued through the event loop rather than run directly: the signal can
+        # arrive while _on_review_progress is inside setValue(), and opening a
+        # modal results dialog from there would re-enter the progress dialog.
+        self.review_thread.finished_ok.connect(
+            lambda reviewed, flagged, usage: QTimer.singleShot(
+                0, lambda: self._on_review_finished(
+                    reviewed, flagged, usage, TMReviewResultsDialog)))
+        self.review_thread.failed.connect(self._on_review_failed)
+        self.review_thread.start()
+
+    @staticmethod
+    def _is_exact_match(seg):
+        """True for a 100%, 101% or context-match segment.
+
+        These came out of the TM unchanged, so reviewing them against that same
+        TM only re-litigates the TM's own content. The two importers label them
+        differently -- Phrase writes m:score 1.01 for its 101% context match
+        while SDL writes percent 100 plus a "Context Match" system -- so both
+        the label and the percent are checked, and the label is parsed as a
+        fallback for files carrying no percent at all.
+        """
+        label = (seg.get('match') or '').strip().upper()
+        if label == 'CM':
+            return True
+        percent = seg.get('match_percent') or ''
+        if not percent:
+            digits = re.match(r'(\d+)\s*%', label)
+            percent = digits.group(1) if digits else ''
+        try:
+            return int(percent) >= 100
+        except (TypeError, ValueError):
+            return False
+
+    def _review_jobs(self, scope, skip_locked):
+        """[(row, source, target)] for the chosen scope.
+
+        Only segments that already have a translation are reviewable; locked
+        segments are left alone by default (they cannot be edited anyway), and
+        exact/context matches are never reviewed, confirmed or not.
+        """
+        jobs = []
+        for row, seg in enumerate(self.segments):
+            if not seg['source'].strip() or not seg['target'].strip():
+                continue
+            if skip_locked and seg.get('locked', False):
+                continue
+            if self._is_exact_match(seg):
+                continue
+            if scope == 'visible' and self.table.isRowHidden(row):
+                continue
+            if scope == 'unconfirmed' and seg['state'] in ('final', 'reviewed'):
+                continue
+            jobs.append((row, seg['source'], seg['target']))
+        return jobs
+
+    def _on_review_progress(self, done, total, phase):
+        """Update the progress dialog.
+
+        QProgressDialog.setValue() pumps the event loop on a modal dialog, so
+        the thread's finished signal can be delivered *inside* that call: the
+        finish handler then runs to completion and clears self.review_progress
+        while this method is still on the stack. Everything therefore goes
+        through a local reference, and the label is set before the value so
+        nothing touches the dialog after it may have been torn down.
+        """
+        dialog = getattr(self, 'review_progress', None)
+        if dialog is None:
+            return
+        dialog.setMaximum(total)
+        dialog.setLabelText(f"{phase}... ({done}/{total})")
+        dialog.setValue(done)
+
+    def _review_recovery_path(self):
+        """Where this file's in-progress review results are parked."""
+        cache = Path.home() / '.cache' / 'xliff2editor' / 'reviews'
+        stem = re.sub(r'[^\w.-]', '_', Path(self.xliff_file).name) if self.xliff_file \
+            else 'unsaved'
+        return cache / f'{stem}.review.json'
+
+    def _save_review_results(self):
+        """Write results to disk after every flagged segment.
+
+        A review can cost an hour and real money, so it must survive a crash,
+        a cancel, or closing the results dialog by mistake. Written atomically
+        via a temporary file so an interrupted write cannot truncate the last
+        good copy.
+        """
+        path = self._review_recovery_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                'xliff_file': self.xliff_file or '',
+                'saved_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                'reviewed': getattr(self, '_review_reviewed_count', 0),
+                'usage_summary': getattr(self, '_review_usage_summary', ''),
+                'results': [{'row': row, 'result': result}
+                            for row, result in self._review_results],
+                'reviewed_rows': [{'row': row, 'result': result}
+                                  for row, result in
+                                  sorted(getattr(self, '_review_all', {}).items())],
+            }
+            tmp = path.with_suffix('.tmp')
+            with open(tmp, 'w', encoding='utf-8') as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=1)
+            tmp.replace(path)
+            self._review_unsaved = 0
+        except OSError:
+            pass          # a failed recovery write must never break the review
+
+    def _load_review_results(self):
+        """Previously saved results for this file, or None."""
+        path = self._review_recovery_path()
+        if not path.exists():
+            return None
+        try:
+            with open(path, encoding='utf-8') as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return None
+        results = [(entry['row'], entry['result'])
+                   for entry in payload.get('results', [])
+                   if isinstance(entry.get('row'), int)]
+        reviewed = {entry['row']: entry['result']
+                    for entry in payload.get('reviewed_rows', [])
+                    if isinstance(entry.get('row'), int)}
+        if not results and not reviewed:
+            return None
+        payload['results'] = results
+        payload['reviewed_rows'] = reviewed
+        return payload
+
+    def _clear_review_results(self):
+        try:
+            self._review_recovery_path().unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _on_segment_reviewed(self, row, result):
+        """Record one verdict, flushing to disk every few segments.
+
+        Clean verdicts are kept as well as flagged ones. They are what lets an
+        interrupted run resume: without them a restart would re-review — and
+        re-pay for — every segment it had already judged.
+        """
+        result = dict(result,
+                      source=self.segments[row]['source'],
+                      target=self.segments[row]['target'])
+        if getattr(self, '_review_all', None) is None:
+            self._review_all = {}
+        if getattr(self, '_review_results', None) is None:
+            self._review_results = []
+        self._review_all[row] = result
+        if result['verdict'] != 'OK':
+            self._review_results.append((row, result))
+
+        self._review_unsaved = getattr(self, '_review_unsaved', 0) + 1
+        if self._review_unsaved >= REVIEW_SAVE_EVERY:
+            self._save_review_results()
+
+    def _on_review_finished(self, reviewed, flagged, usage_summary, results_dialog_cls):
+        if getattr(self, 'review_progress', None):
+            self.review_progress.close()
+            self.review_progress = None
+
+        self._review_reviewed_count = reviewed
+        self._review_usage_summary = usage_summary
+        if self._review_results or getattr(self, '_review_all', None):
+            self._save_review_results()
+
+        if not reviewed:
+            QMessageBox.information(self, "Review Cancelled",
+                                    "No segments were reviewed.")
+            return
+        if not self._review_results:
+            QMessageBox.information(
+                self, "Review Complete",
+                f"Reviewed {reviewed} segments. Nothing was flagged.\n\n{usage_summary}")
+            self._clear_review_results()
+            return
+
+        self._show_review_results(reviewed, usage_summary, results_dialog_cls)
+
+    def _show_review_results(self, reviewed, usage_summary, results_dialog_cls):
+        """Open the triage dialog and apply whatever the user ticks.
+
+        The saved results are kept on disk until they have actually been
+        applied, so dismissing this dialog — or crashing with it open — does
+        not throw away a run that cost an hour and real money.
+        """
+        dialog = results_dialog_cls(self, self._review_results, reviewed, usage_summary)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            QMessageBox.information(
+                self, "Results Kept",
+                "Nothing was applied. The results are saved and will be offered "
+                "again next time you start a review of this file."
+            )
+            return
+
+        fixes = dialog.selected_fixes()
+        if not fixes:
+            return
+        self.table.itemChanged.disconnect()
+        for row, suggestion in fixes:
+            self.segments[row]['target'] = suggestion
+            self.table.item(row, 3).setText(suggestion)
+        self.table.itemChanged.connect(self.on_item_changed)
+        self.is_modified = True
+        self._clear_review_results()
+        QMessageBox.information(self, "Fixes Applied",
+                                f"Applied {len(fixes)} suggested fix(es).\n\n"
+                                "Save the file to keep them.")
+
+    def _on_review_failed(self, message):
+        if getattr(self, 'review_progress', None):
+            self.review_progress.close()
+            self.review_progress = None
+        QMessageBox.critical(self, "Review Failed", message)
 
     def ai_translate_current(self):
         """Translate the current segment using AI"""
@@ -2937,6 +3962,273 @@ class XLIFFEditor(QMainWindow):
             QMessageBox.critical(self, "Merge Error",
                                f"Failed to merge back to MQXLIFF:\n\n{str(e)}")
 
+    def import_from_mxliff(self):
+        """Import Phrase (Memsource) MXLIFF file(s) and convert to XLIFF 2.2"""
+        try:
+            import mxliff_xliff22_converter as converter
+        except ImportError:
+            QMessageBox.critical(self, "Module Missing",
+                               "The mxliff_xliff22_converter.py module is not found.\n\n"
+                               "Please ensure it's in the same directory as this editor.")
+            return
+
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Phrase MXLIFF File(s)",
+            "",
+            "Phrase MXLIFF Files (*.mxliff);;XLIFF Files (*.xlf *.xliff);;All Files (*)"
+        )
+        if not file_paths:
+            return
+
+        default_out = str(Path(file_paths[0]).with_suffix('.xlf'))
+        output_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Converted XLIFF 2.2 File",
+            default_out,
+            "XLIFF Files (*.xlf *.xliff);;All Files (*)"
+        )
+        if not output_path:
+            return
+
+        try:
+            result = converter.convert_mxliff_to_xliff22(
+                file_paths, output_path, verbose=False
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Conversion Error",
+                               f"Failed to convert MXLIFF file(s):\n\n{str(e)}")
+            return
+
+        internal = sum(f.get('internal_files', 0) for f in result['files'])
+        detail = (f"Converted {result['total_segments']} segments from "
+                  f"{result['total_files']} file(s).")
+        if internal > result['total_files']:
+            detail += f"\n\nThe job is joined: {internal} files inside it."
+        detail += ("\n\nKeep the original .mxliff — it is required to export "
+                   "your translations back to Phrase.")
+
+        reply = QMessageBox.question(
+            self,
+            "Conversion Successful",
+            detail + "\n\nOpen the converted file now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.open_xliff_file(str(output_path))
+
+    def export_to_mxliff(self):
+        """Export current XLIFF 2.2 translations back into the original MXLIFF"""
+        if not self.xliff_file:
+            QMessageBox.warning(self, "No File Open",
+                              "Please open an XLIFF 2.2 file first.")
+            return
+
+        try:
+            import xliff22_to_mxliff_merger as merger
+        except ImportError:
+            QMessageBox.critical(self, "Module Missing",
+                               "The xliff22_to_mxliff_merger.py module is not found.\n\n"
+                               "Please ensure it's in the same directory as this editor.")
+            return
+
+        units = self.xliff_soup.find_all('unit') if self.xliff_soup else []
+        if not any(u.get('x-mxliff-origin') == 'phrase' for u in units):
+            QMessageBox.warning(
+                self, "Not a Phrase XLIFF",
+                "This file was not imported from a Phrase MXLIFF.\n\n"
+                "Only XLIFF files created via Phrase import can be exported back."
+            )
+            return
+
+        if self.is_modified:
+            reply = QMessageBox.question(
+                self,
+                "Unsaved Changes",
+                "Save changes to XLIFF 2.2 file before exporting?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+            elif reply == QMessageBox.StandardButton.Yes:
+                self.save_xliff()
+            else:
+                confirm = QMessageBox.warning(
+                    self, "Unsaved Changes Will Not Be Exported",
+                    "Your unsaved edits will NOT be included in the export.\n\n"
+                    "Only the last saved version will be written to the MXLIFF file.\n\n"
+                    "Continue anyway?",
+                    QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+                )
+                if confirm != QMessageBox.StandardButton.Ok:
+                    return
+
+        # A joined Phrase job keeps every file inside one .mxliff, so this is a
+        # single-file merge rather than the directory pairing the other formats use.
+        mxliff_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select the Original MXLIFF Downloaded from Phrase",
+            "",
+            "Phrase MXLIFF Files (*.mxliff);;All Files (*)"
+        )
+        if not mxliff_path:
+            return
+
+        default_out = str(Path(mxliff_path).with_name(
+            Path(mxliff_path).stem + "_translated.mxliff"))
+        output_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Updated MXLIFF for Upload to Phrase",
+            default_out,
+            "Phrase MXLIFF Files (*.mxliff);;All Files (*)"
+        )
+        if not output_path:
+            return
+
+        if Path(output_path).resolve() == Path(mxliff_path).resolve():
+            QMessageBox.warning(
+                self, "Choose a Different File",
+                "The output would overwrite the original MXLIFF.\n\n"
+                "Keep the original intact and pick another name."
+            )
+            return
+
+        try:
+            result = merger.merge_xliff22_to_mxliff(
+                self.xliff_file, mxliff_path, output_path
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Merge Error",
+                               f"Failed to merge back to MXLIFF:\n\n{str(e)}")
+            return
+
+        msg = "Merge completed:\n\n"
+        msg += f"✓ Segments updated: {result['updated']}\n"
+        msg += f"  Unchanged: {result['unchanged']}\n"
+        if result['locked_skipped']:
+            msg += f"  Locked, left untouched: {result['locked_skipped']}\n"
+        if result['missing']:
+            msg += f"⚠ In MXLIFF but not in XLIFF: {result['missing']}\n"
+        if result['extra']:
+            msg += f"⚠ In XLIFF but not in MXLIFF: {result['extra']}\n"
+        msg += f"\nWritten to:\n{output_path}"
+
+        if result['missing'] or result['extra']:
+            QMessageBox.warning(self, "Merge Completed with Issues", msg)
+        else:
+            QMessageBox.information(self, "Merge Successful", msg)
+
+    def import_from_txlf(self):
+        """Import Wordfast Pro TXLF file(s) and convert to XLIFF 2.2"""
+        try:
+            import txlf_xliff22_converter as converter
+        except ImportError:
+            QMessageBox.critical(self, "Module Missing",
+                               "The txlf_xliff22_converter.py module is not found.\n\n"
+                               "Please ensure it's in the same directory as this editor.")
+            return
+
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Wordfast Pro TXLF File(s)",
+            "",
+            "TXLF Files (*.txlf);;All Files (*)"
+        )
+        if not file_paths:
+            return
+
+        default_out = str(Path(file_paths[0]).with_suffix('.xlf'))
+        output_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Converted XLIFF 2.2 File",
+            default_out,
+            "XLIFF Files (*.xlf *.xliff);;All Files (*)"
+        )
+        if not output_path:
+            return
+
+        try:
+            result = converter.convert_txlf_to_xliff22(
+                file_paths, output_path, verbose=False
+            )
+            reply = QMessageBox.question(
+                self,
+                "Conversion Successful",
+                f"Converted {result['total_segments']} segments from {result['total_files']} file(s).\n\n"
+                f"Open the converted file now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.open_xliff_file(str(output_path))
+        except Exception as e:
+            QMessageBox.critical(self, "Conversion Error",
+                               f"Failed to convert TXLF file(s):\n\n{str(e)}")
+
+    def export_to_txlf(self):
+        """Export current XLIFF 2.2 translations back to Wordfast Pro TXLF file(s)"""
+        if not self.xliff_file:
+            QMessageBox.warning(self, "No File Open",
+                              "Please open an XLIFF 2.2 file first.")
+            return
+
+        try:
+            import xliff22_to_txlf_merger as merger
+        except ImportError:
+            QMessageBox.critical(self, "Module Missing",
+                               "The xliff22_to_txlf_merger.py module is not found.\n\n"
+                               "Please ensure it's in the same directory as this editor.")
+            return
+
+        if self.is_modified:
+            reply = QMessageBox.question(
+                self,
+                "Unsaved Changes",
+                "Save changes to XLIFF 2.2 file before exporting?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+            elif reply == QMessageBox.StandardButton.Yes:
+                self.save_xliff()
+
+        txlf_dir = QFileDialog.getExistingDirectory(
+            self, "Select Directory with Original TXLF Files"
+        )
+        if not txlf_dir:
+            return
+
+        output_dir = QFileDialog.getExistingDirectory(
+            self, "Select Output Directory for Updated TXLF Files"
+        )
+        if not output_dir:
+            return
+
+        try:
+            results = merger.batch_merge_xliff22_to_txlf(
+                self.xliff_file, txlf_dir, output_dir, dry_run=False
+            )
+            success = sum(1 for r in results if r['status'] == 'success')
+            no_match = sum(1 for r in results if r['status'] == 'no_match')
+            errors = sum(1 for r in results if r['status'] == 'error')
+
+            msg = "Merge completed:\n\n"
+            msg += f"✓ Successfully merged: {success} file(s)\n"
+            if no_match:
+                msg += f"⚠ No match found: {no_match} file(s)\n"
+            if errors:
+                msg += f"✗ Errors: {errors} file(s)\n"
+            if success:
+                total_updated = sum(r.get('updated', 0) for r in results if r['status'] == 'success')
+                msg += f"\nTotal trans-units updated: {total_updated}"
+
+            if errors or no_match:
+                QMessageBox.warning(self, "Merge Completed with Issues", msg)
+            else:
+                QMessageBox.information(self, "Merge Successful", msg)
+        except Exception as e:
+            QMessageBox.critical(self, "Merge Error",
+                               f"Failed to merge back to TXLF:\n\n{str(e)}")
+
     def import_from_excel(self):
         """Import bilingual Excel file and convert to XLIFF 2.2"""
         try:
@@ -3079,6 +4371,130 @@ class XLIFFEditor(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Export Error",
                                  f"Failed to write to Excel file:\n\n{str(e)}")
+
+    def import_from_srt(self):
+        """Import SRT-tab file and convert to XLIFF 2.2."""
+        try:
+            import srt_xliff22_converter as converter
+            from srt_xliff22_converter import SrtImportDialog
+        except ImportError:
+            QMessageBox.critical(
+                self, "Module Missing",
+                "srt_xliff22_converter.py is not found.\n\n"
+                "Please ensure it's in the same directory as this editor."
+            )
+            return
+
+        dialog = SrtImportDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        params = dialog.values()
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select SRT-tab File", "",
+            "SRT Files (*.srt);;Text Files (*.txt);;All Files (*)"
+        )
+        if not file_path:
+            return
+
+        default_out = str(Path(file_path).with_suffix('.xlf'))
+        output_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Converted XLIFF 2.2 File", default_out,
+            "XLIFF Files (*.xlf *.xliff);;All Files (*)"
+        )
+        if not output_path:
+            return
+
+        try:
+            result = converter.convert_srt_to_xliff22(
+                input_path=file_path,
+                output_path=output_path,
+                src_lang=params['src_lang'],
+                tgt_lang=params['tgt_lang'],
+            )
+            reply = QMessageBox.question(
+                self, "Conversion Successful",
+                f"Converted {result['total_lines']} line(s) into "
+                f"{result['total_units']} unit(s).\n\nOpen the converted file now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.open_xliff_file(str(output_path))
+        except Exception as e:
+            QMessageBox.critical(self, "Conversion Error",
+                                 f"Failed to convert SRT file:\n\n{str(e)}")
+
+    def export_to_srt(self):
+        """Export current XLIFF 2.2 translations back to SRT-tab format."""
+        if not self.xliff_file:
+            QMessageBox.warning(self, "No File Open",
+                                "Please open an XLIFF 2.2 file first.")
+            return
+
+        file_tag = self.xliff_soup.find('file') if self.xliff_soup else None
+        units = self.xliff_soup.find_all('unit') if self.xliff_soup else []
+        has_timecodes = any(u.get('x-srt-timecode') for u in units)
+        if not has_timecodes:
+            QMessageBox.warning(
+                self, "Not an SRT XLIFF",
+                "This file was not imported from SRT-tab.\n\n"
+                "Only XLIFF files created via SRT import can be exported back."
+            )
+            return
+
+        try:
+            import xliff22_to_srt_merger as merger
+        except ImportError:
+            QMessageBox.critical(
+                self, "Module Missing",
+                "xliff22_to_srt_merger.py is not found.\n\n"
+                "Please ensure it's in the same directory as this editor."
+            )
+            return
+
+        if self.is_modified:
+            reply = QMessageBox.question(
+                self, "Unsaved Changes",
+                "Save changes to XLIFF 2.2 file before exporting?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+            elif reply == QMessageBox.StandardButton.Yes:
+                self.save_xliff()
+            else:
+                confirm = QMessageBox.warning(
+                    self, "Unsaved Changes Will Not Be Exported",
+                    "Your unsaved edits will NOT be included in the export.\n\n"
+                    "Only the last saved version will be written to the SRT file.\n\n"
+                    "Continue anyway?",
+                    QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+                )
+                if confirm != QMessageBox.StandardButton.Ok:
+                    return
+
+        original_name = file_tag.get('original', '') if file_tag else ''
+        default_out = str(Path(original_name).name) if original_name else ''
+        srt_path, _ = QFileDialog.getSaveFileName(
+            self, "Save SRT-tab File", default_out,
+            "SRT Files (*.srt);;Text Files (*.txt);;All Files (*)"
+        )
+        if not srt_path:
+            return
+
+        try:
+            result = merger.merge_xliff22_to_srt(self.xliff_file, srt_path)
+            QMessageBox.information(
+                self, "Export Successful",
+                f"Written {result['lines_written']} line(s) to "
+                f"{Path(srt_path).name}."
+            )
+        except ValueError as e:
+            QMessageBox.warning(self, "Export Error", str(e))
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error",
+                                 f"Failed to write SRT file:\n\n{str(e)}")
 
 
 class ScreenChoiceDialog(QDialog):
