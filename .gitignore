@@ -1,6 +1,11 @@
 # Worktrees
 .worktrees/
 
+# Agent planning scratch — specs and checkbox task lists addressed to the
+# worker implementing them, not documentation of the editor. Removed from the
+# repo 2026-09-19; ignored so a tool recreating them cannot add them back.
+docs/superpowers/
+
 # Settings file — contains API keys, never commit
 xconfig.json
 xconfig.tmp
