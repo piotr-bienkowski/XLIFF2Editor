@@ -98,7 +98,7 @@ def map_status(sdl_status):
     """Map SDL Trados status values to XLIFF 2.2 state values."""
     if not sdl_status:
         return None
-    
+
     status_mapping = {
         'Draft': 'initial',
         'Translated': 'translated',
@@ -107,8 +107,33 @@ def map_status(sdl_status):
         'RejectedTranslation': 'needs-review-translation',
         'RejectedSignOff': 'needs-review-translation',
     }
-    
+
     return status_mapping.get(sdl_status, sdl_status.lower())
+
+
+def compute_match_label(origin, percent, system):
+    """
+    Compute a short display label for the TM/MT match value of an sdl:seg.
+    Returns strings like '100%', '91%', 'CM' (context match), 'MT', 'AP', '' (none).
+    """
+    origin = (origin or '').lower()
+    system = system or ''
+
+    if origin == 'tm':
+        if percent:
+            if percent == '100' and 'Context Match' in system:
+                return 'CM'
+            return f'{percent}%'
+        return 'TM'
+    if origin in ('nmt', 'mt'):
+        return 'MT'
+    if origin == 'auto-propagated':
+        return 'AP'
+    if origin == 'source':
+        return 'Src'
+    if origin == 'interactive':
+        return 'HT'
+    return ''
 
 
 def process_sdlxliff_file(input_path, file_id, segment_counter=0):
@@ -145,6 +170,7 @@ def process_sdlxliff_file(input_path, file_id, segment_counter=0):
         seg_defs = trans_unit.find('sdl:seg-defs', NS)
         status_map = {}
         locked_map = {}
+        match_map = {}    # {mid: (label, origin, system, percent)}
         if seg_defs is not None:
             for seg_def in seg_defs.findall('sdl:seg', NS):
                 seg_id = seg_def.get('id')
@@ -154,6 +180,13 @@ def process_sdlxliff_file(input_path, file_id, segment_counter=0):
                     status_map[seg_id] = map_status(conf)
                 if seg_id and locked:
                     locked_map[seg_id] = (locked.lower() == 'true')
+                if seg_id:
+                    origin = seg_def.get('origin') or ''
+                    system = seg_def.get('origin-system') or ''
+                    percent = seg_def.get('percent') or ''
+                    label = compute_match_label(origin, percent, system)
+                    if label or origin or system or percent:
+                        match_map[seg_id] = (label, origin, system, percent)
         
         unit22 = etree.SubElement(file22, '{%s}unit' % NS_XLIFF22, id=unit_id)
         
@@ -179,10 +212,21 @@ def process_sdlxliff_file(input_path, file_id, segment_counter=0):
                 segment_attrs = {'id': str(segment_counter)}
                 if mid in status_map:
                     segment_attrs['state'] = status_map[mid]
-                
+
                 if mid in locked_map and locked_map[mid]:
                     segment_attrs['translate'] = 'no'
-                
+
+                if mid in match_map:
+                    label, origin, system, percent = match_map[mid]
+                    if label:
+                        segment_attrs['match'] = label
+                    if origin:
+                        segment_attrs['match-origin'] = origin
+                    if system:
+                        segment_attrs['match-system'] = system
+                    if percent:
+                        segment_attrs['match-percent'] = percent
+
                 segment22 = etree.SubElement(unit22, '{%s}segment' % NS_XLIFF22, **segment_attrs)
                 
                 source22 = etree.SubElement(segment22, '{%s}source' % NS_XLIFF22)
