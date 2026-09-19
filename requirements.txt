@@ -1,0 +1,41 @@
+# XLIFF2Editor dependencies.
+#
+#     pip install -r requirements.txt
+#
+# Versions are the ones this has been run against, given as minimums rather
+# than pins so the file does not go stale faster than the code does.
+
+# ---- required ------------------------------------------------------------
+PyQt6>=6.6            # the whole UI
+lxml>=5.0             # every converter and merger
+beautifulsoup4>=4.12  # XLIFF parsing in the editor itself
+fuzzywuzzy>=0.18      # TMX fuzzy matching in the TM panel
+
+# Makes fuzzywuzzy roughly an order of magnitude faster. Optional, but the TM
+# panel scans the whole TMX on every row change, so it is felt.
+python-Levenshtein>=0.21
+
+# ---- optional: AI / MT translation --------------------------------------
+# Install only the providers you intend to use; each is imported lazily and
+# its absence disables just that provider.
+anthropic>=0.40              # Claude
+google-generativeai>=0.8     # Gemini
+openai>=1.40                 # OpenAI, and the HybridTM review via OpenRouter
+deepl>=1.18                  # DeepL
+
+# ---- optional: HybridTM semantic review ---------------------------------
+# Needs `openai` above for the OpenRouter client, plus the HybridTM server
+# itself, which is a Node package rather than a Python one -- see the
+# "HybridTM Semantic Translation Memory" section of README.md.
+
+# ---- optional: Excel import/export ---------------------------------------
+openpyxl>=3.1         # read/write .xlsx
+regex>=2023.0         # Unicode-aware SRX segmentation; falls back to stdlib re
+
+# ---- optional: spell checking --------------------------------------------
+# Needs the system libenchant library as well as this binding; gracefully
+# disabled if missing.
+pyenchant>=3.2
+
+# ---- development ---------------------------------------------------------
+pytest>=7.4

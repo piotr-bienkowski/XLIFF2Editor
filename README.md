@@ -55,6 +55,14 @@ AI/MT translation, spell checking, and Excel import/export are optional features
 | `openpyxl`            | Excel            | Read/write Excel workbooks (.xlsx)                                    |
 | `regex`               | Excel            | Unicode-aware SRX segmentation (falls back to stdlib `re` if missing) |
 
+`openai` does double duty: it is the OpenAI MT provider *and* the client the HybridTM batch review uses to reach OpenRouter, so the review needs it even if you never translate with OpenAI.
+
+All of the above are listed in `requirements.txt`:
+
+```bash
+pip install -r requirements.txt
+```
+
 ### System Dependencies
 
 | Dependency                                                   | Purpose                                  |
@@ -299,6 +307,38 @@ Measured at budget 128: ~$0.0015 per call, ~414–487 input tokens per call, rea
 The end-of-run summary reports calls, repeat-cache hits, tokens in/out, reasoning tokens, cached prompt tokens and reported cost. On this job `Cached prompt tokens` reads 0 and the summary says so — the system prompt here is only a few hundred tokens, well under the prefix length Gemini requires before implicit caching engages. That is expected, not a fault; caching pays off for the large job-specific prompts the standalone scripts use.
 
 Raising `REASONING_BUDGET` changes marginal judgement but not the substantive catches. Measured over six segments, 128 and 512 agreed on every clear case (a wrong number, a TM terminology clash) and differed only on two borderline stylistic calls — in opposite directions.
+
+#### Setting up HybridTM
+
+The server is a Node package, not a Python one, so it is not covered by `requirements.txt`. It needs **Node 24+ / npm 11+**.
+
+```bash
+# Install locally, in your home directory. Never -g: a global copy shadows the
+# local one and the two drift apart.
+cd ~ && npm install hybridtm
+
+# Create an instance. "large" is onnx-community/gte-multilingual-base (768d);
+# "compact" and "standard" are smaller and faster but score noticeably worse
+# across languages. The model downloads on first use into ~/.cache/hybridtm.
+~/node_modules/.bin/hybridtm create -name myjob \
+    -path ~/hybridtm/myjob.lancedb -model large
+
+# Populate it from a TMX, XLIFF or SDLTM
+~/node_modules/.bin/hybridtm import -name myjob -file ~/TMX/myjob.tmx
+
+# Check it registered
+~/node_modules/.bin/hybridtm list
+```
+
+Then set `hybridtm_instance` to `myjob` in `xconfig.json`, or pick it from the review dialog, which saves it for you. The editor starts `hybridtm serve` on 127.0.0.1:8050 by itself when it needs it.
+
+Three things that will bite you otherwise:
+
+- **Stop the server before a CLI import.** It holds the LanceDB open. `hybridtm stop`, import, then let the editor restart it.
+- **A server started *before* an instance was created cannot see it.** If `open` reports the instance does not exist, restart the server.
+- **Language codes must match the TMX exactly.** `en-US` finds matches where `en` silently returns nothing — no error, just an empty result.
+
+The batch review also needs `OPENROUTER_API_KEY` in `~/config.json` (or the environment). The side panel does not — it is pure TM lookup and costs nothing.
 
 #### Match tiering
 
