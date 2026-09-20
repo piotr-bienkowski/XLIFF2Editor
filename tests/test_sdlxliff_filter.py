@@ -1,5 +1,6 @@
 """Tests for the SDLXLIFF -> XLIFF 2.2 -> SDLXLIFF round-trip."""
 
+import copy
 import sys
 import tempfile
 from pathlib import Path
@@ -47,8 +48,27 @@ TAG_ONLY_SEGMENT = _sdlxliff("""
 </trans-unit>""")
 
 
-def _roundtrip(tmp_path, sdl_text, strip_mid=False):
-    """Convert, fill every target with PL-<n>, merge back, return the tree."""
+# Prepared but never segmented in Studio: <seg-source> mirrors <source> with
+# no seg mrks at all, an empty <target/>, no seg-defs, no target-language.
+UNSEGMENTED = f"""<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="{NS12}" xmlns:sdl="{NSSDL}" version="1.2">
+<file original="x.idml" datatype="x-sdlfilterframework2" source-language="de-DE"><body>
+<trans-unit id="n1">
+<source>\u201e<x id="0"/>\u201c auf Seite <x id="1"/></source>
+<seg-source>\u201e<x id="0"/>\u201c auf Seite <x id="1"/></seg-source>
+<target/>
+</trans-unit>
+<trans-unit id="n2"><source><g id="34"/></source><seg-source><g id="34"/></seg-source><target/></trans-unit>
+<trans-unit id="n3" translate="no"><source>Skip me.</source></trans-unit>
+</body></file></xliff>"""
+
+
+def _roundtrip(tmp_path, sdl_text, strip_mid=False, keep_tags=False):
+    """Convert, fill every target with PL-<n>, merge back, return the tree.
+
+    keep_tags mirrors the source inline tags into the target, the way a
+    translator working in the grid would.
+    """
     src = tmp_path / 'in.sdlxliff'
     src.write_text(sdl_text, encoding='utf-8')
     xlf = tmp_path / 'mid.xlf'
@@ -61,6 +81,9 @@ def _roundtrip(tmp_path, sdl_text, strip_mid=False):
         target = segment.find(f'{{{NS22}}}target')
         if target is None:
             target = etree.SubElement(segment, f'{{{NS22}}}target')
+        if keep_tags:
+            for child in segment.find(f'{{{NS22}}}source'):
+                target.append(copy.deepcopy(child))
         target.text = f'PL-{n}'
         segment.set('state', 'translated')
 
@@ -184,3 +207,63 @@ def test_loader_reads_every_segment_of_a_unit():
         assert all(s['state'] == 'initial' for s in segments)
         # Each row must point at its own segment node, not a shared one.
         assert len({id(s['segment_node']) for s in segments}) == 3
+
+
+def test_unsegmented_seg_source_still_produces_segments():
+    """A seg-source with no mrks means 'not segmented', not 'nothing to do'."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        src = tmp / 'in.sdlxliff'
+        src.write_text(UNSEGMENTED, encoding='utf-8')
+        xlf = tmp / 'out.xlf'
+        convert_sdlxliff_to_xliff22([src], xlf, verbose=False)
+
+        root = etree.parse(str(xlf)).getroot()
+        units = root.findall(f'.//{{{NS22}}}unit')
+        # n2 is tag-only (nothing to translate) and n3 is translate="no".
+        assert [u.get('id') for u in units] == ['n1']
+
+        source = units[0].find(f'{{{NS22}}}segment/{{{NS22}}}source')
+        # Placeholders must survive as <ph>, not be flattened away.
+        assert [p.get('id') for p in source.findall(f'{{{NS22}}}ph')] == ['0', '1']
+        assert source.text == '\u201e'
+        assert ''.join(source.itertext()) == '\u201e\u201c auf Seite '
+
+
+def test_unsegmented_unit_round_trips_with_tags():
+    with tempfile.TemporaryDirectory() as tmp:
+        tree, (updated, skipped) = _roundtrip(Path(tmp), UNSEGMENTED, keep_tags=True)
+
+        unit = _unit(tree, 'n1')
+        target = unit.find('xliff12:target', NS12_MAP)
+        assert target.text == 'PL-1'
+        assert [x.get('id') for x in target.findall('xliff12:x', NS12_MAP)] == ['0', '1']
+        # Units with nothing to translate are left exactly as they were.
+        assert _unit(tree, 'n2').find('xliff12:target', NS12_MAP).text is None
+        assert _unit(tree, 'n3').find('xliff12:target', NS12_MAP) is None
+        assert (updated, skipped) == (1, 0)
+
+
+def test_target_language_filled_in_when_missing():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        src = tmp / 'in.sdlxliff'
+        src.write_text(UNSEGMENTED, encoding='utf-8')
+        out = tmp / 'out.sdlxliff'
+        update_sdlxliff_targets(str(src), {}, str(out), target_lang='pl-PL')
+
+        file_elem = etree.parse(str(out)).getroot().find('.//xliff12:file', NS12_MAP)
+        assert file_elem.get('target-language') == 'pl-PL'
+        assert file_elem.get('source-language') == 'de-DE'
+
+
+def test_existing_target_language_is_not_overwritten():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        src = tmp / 'in.sdlxliff'
+        src.write_text(NOT_PRETRANSLATED, encoding='utf-8')  # carries pl-PL
+        out = tmp / 'out.sdlxliff'
+        update_sdlxliff_targets(str(src), {}, str(out), target_lang='de-DE')
+
+        file_elem = etree.parse(str(out)).getroot().find('.//xliff12:file', NS12_MAP)
+        assert file_elem.get('target-language') == 'pl-PL'

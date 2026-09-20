@@ -234,13 +234,22 @@ def write_mrk_content(mrk, target_content):
             mrk.append(item)
 
 
-def update_sdlxliff_targets(sdlxliff_path, segment_map, output_path):
+def update_sdlxliff_targets(sdlxliff_path, segment_map, output_path, target_lang=None):
     """
     Update the SDLXLIFF file with translations from the segment map.
+
+    target_lang, when given, is written to any <file> that carries no
+    target-language yet - an unsegmented/unprepared SDLXLIFF often has none,
+    and Studio needs it to open the merged file as a bilingual.
     """
     # Parse SDLXLIFF
     tree = etree.parse(sdlxliff_path)
     root = tree.getroot()
+
+    if target_lang:
+        for file_elem in root.findall('.//xliff12:file', NS_XLIFF12):
+            if not file_elem.get('target-language'):
+                file_elem.set('target-language', target_lang)
 
     updated_count = 0
     skipped_count = 0
@@ -411,6 +420,9 @@ def batch_merge_xliff22_to_sdlxliff(xliff22_path, sdlxliff_dir, output_dir, dry_
     
     # Find all file elements
     file_elements = root.findall('.//{%s}file' % NS_XLIFF22['xliff22'], NS_XLIFF22)
+
+    # Used to fill in a target-language the original SDLXLIFF never had
+    target_lang = root.get('trgLang')
     
     print(f"Found {len(file_elements)} file element(s) in XLIFF 2.2")
     print("=" * 70)
@@ -469,7 +481,9 @@ def batch_merge_xliff22_to_sdlxliff(xliff22_path, sdlxliff_dir, output_dir, dry_
         # Update SDLXLIFF
         output_path = output_dir / sdlxliff_path.name
         try:
-            updated, skipped = update_sdlxliff_targets(sdlxliff_path, segment_map, output_path)
+            updated, skipped = update_sdlxliff_targets(
+                sdlxliff_path, segment_map, output_path, target_lang=target_lang
+            )
             print(f"  ✓ Updated {updated} segments")
             if skipped > 0:
                 print(f"  ⚠ Skipped {skipped} segments (no translation)")

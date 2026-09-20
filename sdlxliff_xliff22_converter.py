@@ -94,6 +94,34 @@ def extract_text_and_tags(element, ns_xliff22=NS_XLIFF22):
     return result
 
 
+def fill_element(elem, content):
+    """Append mixed text/element content (from extract_text_and_tags) to elem."""
+    if not content:
+        return
+
+    content = list(content)
+    if isinstance(content[0], str):
+        elem.text = content[0]
+        content = content[1:]
+
+    for item in content:
+        if isinstance(item, str):
+            if len(elem):
+                elem[-1].tail = (elem[-1].tail or '') + item
+            else:
+                elem.text = (elem.text or '') + item
+        else:
+            elem.append(item)
+
+
+def has_content(content):
+    """True if extract_text_and_tags output holds any text or any inline tag."""
+    return any(
+        item.strip() if isinstance(item, str) else True
+        for item in content
+    )
+
+
 def map_status(sdl_status):
     """Map SDL Trados status values to XLIFF 2.2 state values."""
     if not sdl_status:
@@ -190,9 +218,15 @@ def process_sdlxliff_file(input_path, file_id, segment_counter=0):
         
         unit22 = etree.SubElement(file22, '{%s}unit' % NS_XLIFF22, id=unit_id)
         
-        if seg_source is not None:
-            source_mrks = seg_source.findall('.//xliff12:mrk[@mtype="seg"]', NS)
-            
+        # A <seg-source> without any seg mrk carries no segmentation (the file
+        # was prepared but never segmented in Studio), so it is handled as an
+        # unsegmented unit: one trans-unit becomes one segment.
+        source_mrks = (
+            seg_source.findall('.//xliff12:mrk[@mtype="seg"]', NS)
+            if seg_source is not None else []
+        )
+
+        if source_mrks:
             target_mrks = {}
             if target is not None:
                 for mrk in target.findall('.//xliff12:mrk[@mtype="seg"]', NS):
@@ -271,26 +305,30 @@ def process_sdlxliff_file(input_path, file_id, segment_counter=0):
                             else:
                                 target22.append(item)
         else:
-            if source_elem is None:
+            # Prefer seg-source (Studio's working copy of the source) when it
+            # carries the content, otherwise fall back to <source>.
+            source_holder = seg_source if seg_source is not None else source_elem
+            source_content = (
+                extract_text_and_tags(source_holder) if source_holder is not None else []
+            )
+            if not has_content(source_content) and source_elem is not None:
+                source_content = extract_text_and_tags(source_elem)
+            if not has_content(source_content):
                 continue
-            
-            source_text = ''.join(source_elem.itertext()).strip()
-            if not source_text:
-                continue
-            
+
             segment_counter += 1
             segment22 = etree.SubElement(unit22, '{%s}segment' % NS_XLIFF22, id=str(segment_counter))
-            
+
             source22 = etree.SubElement(segment22, '{%s}source' % NS_XLIFF22)
             source22.set('{%s}space' % NS_XML, 'preserve')
-            source22.text = source_text
-            
+            fill_element(source22, source_content)
+
             if target is not None:
-                target_text = ''.join(target.itertext()).strip()
-                if target_text:
+                target_content = extract_text_and_tags(target)
+                if has_content(target_content):
                     target22 = etree.SubElement(segment22, '{%s}target' % NS_XLIFF22)
                     target22.set('{%s}space' % NS_XML, 'preserve')
-                    target22.text = target_text
+                    fill_element(target22, target_content)
         
         if not len(unit22):
             file22.remove(unit22)
