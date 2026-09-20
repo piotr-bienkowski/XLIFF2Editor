@@ -87,8 +87,8 @@ class TagProtectedTextEdit(QPlainTextEdit):
         self.tag_positions = []
         text = self.toPlainText()
         
-        # Find all tags: <1>, </1>, <1/>, etc.
-        pattern = r'</?(\d+)/?>'
+        # Find all tags: <1>, </1>, <1/>, and the tab token <t/>
+        pattern = r'</?\d+/?>|<t/>'
         
         cursor = QTextCursor(self.document())
         cursor.beginEditBlock()
@@ -653,7 +653,7 @@ class RichTextDelegate(QStyledItemDelegate):
         text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
         # Convert our placeholders back to red HTML spans
         # Matches <1>, </1>, and <1/>
-        text = re.sub(r'(&lt;/?\d+/?&gt;)', r'<span style="color:red; font-weight:bold;">\1</span>', text)
+        text = re.sub(r'(&lt;/?\d+/?&gt;|&lt;t/&gt;)', r'<span style="color:red; font-weight:bold;">\1</span>', text)
         
         doc = QTextDocument()
         doc.setHtml(text)
@@ -729,7 +729,9 @@ class XLIFFLoadThread(QThread):
     def run(self):
         try:
             with open(self.filepath, 'r', encoding='utf-8') as f:
-                xliff_soup = BeautifulSoup(f.read(), 'xml')
+                xliff_soup = BeautifulSoup(
+                    f.read(), 'xml', preserve_whitespace_tags=PRESERVE_WS_TAGS
+                )
             
             segments = []
             units = xliff_soup.find_all('unit')
@@ -826,7 +828,8 @@ class AITranslationThread(QThread):
             f"Translate the following text{lang_hint}. "
             f"Output only the translation, no explanations or additional text.\n"
             f"If the text contains tags like <1>, </1>, or <2/>, keep them exactly as-is "
-            f"and place them correctly in the translation."
+            f"and place them correctly in the translation. "
+            f"<t/> is a tab character: keep it too, in the position the target needs."
             f"{glossary_text}"
             f"{context_text}\n\n"
             f"Text:\n{source_text}"
@@ -974,7 +977,21 @@ def _filter_matches(src_text: str, trg_text: str, src_pat, trg_pat, use_and: boo
 # paired token may be left half-deleted, so serialisation escapes every literal
 # run and balances the tokens rather than pasting the cell into XML as-is.
 
-TAG_TOKEN_RE = re.compile(r'<(\d+)/>|</(\d+)>|<(\d+)>')
+# A literal tab inside segment content is invisible in the grid, cannot be
+# typed into a cell (Tab moves focus) and is easily lost, so it is shown as its
+# own red token and turned back into a tab on save.
+TAB_TOKEN = '<t/>'
+TAB_TOKEN_RE = re.compile(r'<t/>')
+
+TAG_TOKEN_RE = re.compile(r'<(\d+)/>|</(\d+)>|<(\d+)>|(<t/>)')
+
+# BeautifulSoup's XML builder collapses a whitespace-only text node to a single
+# space unless its tag is listed here, which silently turned a tab between two
+# inline tags into a space.
+PRESERVE_WS_TAGS = frozenset({
+    'root', 'source', 'target', 'segment', 'ignorable', 'unit',
+    'pc', 'ph', 'sc', 'ec', 'sm', 'em', 'mrk', 'cp', 'data', 'note',
+})
 
 
 def parse_tags_from_element(element):
@@ -995,7 +1012,7 @@ def _parse_tag_children(element, tag_map, counter):
     text_parts = []
     for child in element.children:
         if isinstance(child, NavigableString):
-            text_parts.append(str(child))
+            text_parts.append(str(child).replace('\t', TAB_TOKEN))
         elif isinstance(child, Tag):
             counter[0] += 1
             num = counter[0]
@@ -1042,7 +1059,14 @@ def build_xml_fragment(text, tag_map):
     pos = 0
 
     for match in TAG_TOKEN_RE.finditer(text):
-        empty_id, close_id, open_id = match.groups()
+        empty_id, close_id, open_id, tab_token = match.groups()
+
+        if tab_token:
+            out.append(xml_escape(text[pos:match.start()]))
+            out.append('\t')
+            pos = match.end()
+            continue
+
         info = tag_map.get(int(empty_id or close_id or open_id))
 
         if info is None:
@@ -1845,7 +1869,10 @@ class XLIFFEditor(QMainWindow):
         """Converts grid text with <1> tokens back into XLIFF XML nodes."""
         fragment_xml = build_xml_fragment(text, tag_map)
         try:
-            fragment = BeautifulSoup(f"<root>{fragment_xml}</root>", 'xml')
+            fragment = BeautifulSoup(
+                f"<root>{fragment_xml}</root>", 'xml',
+                preserve_whitespace_tags=PRESERVE_WS_TAGS
+            )
             return fragment.root.contents
         except Exception:
             return [soup.new_string(text)]
@@ -3128,7 +3155,8 @@ class XLIFFEditor(QMainWindow):
                     skipped_has_target += 1
                     continue
 
-                src = self._TAG_TOKEN_RE.sub('', seg.get('source', '')).strip()
+                src = TAB_TOKEN_RE.sub('\t', seg.get('source', ''))
+                src = self._TAG_TOKEN_RE.sub('', src).strip()
                 if not src:
                     continue
 
