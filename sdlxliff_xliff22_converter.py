@@ -210,6 +210,10 @@ def process_sdlxliff_file(input_path, file_id, segment_counter=0):
                 segment_counter += 1
                 
                 segment_attrs = {'id': str(segment_counter)}
+                if mid is not None:
+                    # Carry the SDL segment id through so the merger can map
+                    # translations back by mid instead of by position.
+                    segment_attrs['sdl-mid'] = mid
                 if mid in status_map:
                     segment_attrs['state'] = status_map[mid]
 

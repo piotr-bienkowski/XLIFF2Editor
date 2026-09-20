@@ -6,6 +6,7 @@ back into their corresponding SDLXLIFF files based on file ID matching.
 """
 
 import argparse
+import copy
 import sys
 from pathlib import Path
 from lxml import etree
@@ -138,13 +139,99 @@ def build_segment_map_from_file_element(file_elem):
                 # Extract target content with tags
                 target_content = extract_text_from_xliff22(target_elem)
                 
-                # Store in map using segment position
+                # Store in map using segment position; 'mid' (when the file was
+                # produced by the SDLXLIFF converter) is the authoritative key.
                 segment_map[unit_id][segment_counter] = {
                     'target_content': target_content,
-                    'state': state
+                    'state': state,
+                    'mid': segment.get('sdl-mid')
                 }
     
     return segment_map
+
+
+def build_target_mrk_skeleton(target, seg_source):
+    """
+    Make <target> mirror the <seg-source> segmentation and return {mid: mrk}.
+
+    A file that was never pre-translated in Studio has no <target> at all, so
+    there is nothing to write segment translations into. Rather than collapsing
+    the unit to a single flat target (which loses every segment after the
+    first), rebuild the target from the seg-source structure.
+
+    Existing target mrks are reused as-is (content and attributes kept); mrks
+    that do not exist yet are seeded with a copy of the source mrk, so
+    placeholder-only segments keep their tags instead of coming out empty.
+    Returns {} when the unit is not segmented, i.e. the flat-target case.
+    """
+    if seg_source is None:
+        return {}
+
+    existing = {}
+    for mrk in target.findall('.//xliff12:mrk[@mtype="seg"]', NS_XLIFF12):
+        mid = mrk.get('mid')
+        if mid is not None:
+            existing[mid] = mrk
+
+    source_mrks = seg_source.findall('.//xliff12:mrk[@mtype="seg"]', NS_XLIFF12)
+    source_mids = [m.get('mid') for m in source_mrks if m.get('mid') is not None]
+
+    if not source_mids:
+        return existing
+
+    if list(existing.keys()) == source_mids:
+        # Target already carries exactly this segmentation - leave it alone.
+        return existing
+
+    # Rebuild. Keep references to the existing mrks so they survive detaching.
+    kept = dict(existing)
+    attribs = dict(target.attrib)
+    for child in list(target):
+        target.remove(child)
+    target.text = seg_source.text
+    target.attrib.clear()
+    target.attrib.update(attribs)
+
+    result = {}
+    for src_mrk in source_mrks:
+        mid = src_mrk.get('mid')
+        new_mrk = kept.get(mid) if mid is not None else None
+        if new_mrk is None:
+            new_mrk = copy.deepcopy(src_mrk)
+        new_mrk.tail = src_mrk.tail
+        target.append(new_mrk)
+        if mid is not None:
+            result[mid] = new_mrk
+
+    return result
+
+
+def write_mrk_content(mrk, target_content):
+    """Replace the content of a target mrk, preserving its attributes."""
+    # lxml's clear() also drops the tail, which holds the whitespace that
+    # separates this segment from the next one.
+    attribs = dict(mrk.attrib)
+    tail = mrk.tail
+    mrk.clear()
+    mrk.attrib.update(attribs)
+    mrk.tail = tail
+
+    if not target_content:
+        return
+
+    content = list(target_content)
+    if isinstance(content[0], str):
+        mrk.text = content[0]
+        content = content[1:]
+
+    for item in content:
+        if isinstance(item, str):
+            if len(mrk):
+                mrk[-1].tail = (mrk[-1].tail or '') + item
+            else:
+                mrk.text = (mrk.text or '') + item
+        else:
+            mrk.append(item)
 
 
 def update_sdlxliff_targets(sdlxliff_path, segment_map, output_path):
@@ -154,90 +241,91 @@ def update_sdlxliff_targets(sdlxliff_path, segment_map, output_path):
     # Parse SDLXLIFF
     tree = etree.parse(sdlxliff_path)
     root = tree.getroot()
-    
+
     updated_count = 0
     skipped_count = 0
-    
+
     # Process each trans-unit
     for trans_unit in root.findall('.//xliff12:trans-unit', NS_XLIFF12):
         unit_id = trans_unit.get('id')
-        
+
         # Skip if no translations for this unit
         if unit_id not in segment_map:
             continue
-        
+
         # Get target element (create if doesn't exist)
         target = trans_unit.find('xliff12:target', NS_XLIFF12)
         if target is None:
-            # Create target element after source
-            source = trans_unit.find('xliff12:source', NS_XLIFF12)
-            target_index = list(trans_unit).index(source) + 1
+            # Create target element after seg-source (or source) 
+            anchor = trans_unit.find('xliff12:seg-source', NS_XLIFF12)
+            if anchor is None:
+                anchor = trans_unit.find('xliff12:source', NS_XLIFF12)
             target = etree.Element('{urn:oasis:names:tc:xliff:document:1.2}target')
-            trans_unit.insert(target_index, target)
-        
+            if anchor is None:
+                trans_unit.append(target)
+            else:
+                trans_unit.insert(list(trans_unit).index(anchor) + 1, target)
+
         # Get seg-defs for status updates
         seg_defs = trans_unit.find('sdl:seg-defs', NS_XLIFF12)
-        
-        # Find all target mrk segments
+
+        # Make sure the target carries the same segmentation as seg-source
+        seg_source = trans_unit.find('xliff12:seg-source', NS_XLIFF12)
+        mrk_by_mid = build_target_mrk_skeleton(target, seg_source)
+
         target_mrks = target.findall('.//xliff12:mrk[@mtype="seg"]', NS_XLIFF12)
-        
+
         if target_mrks:
-            # Update each segment
-            segment_counter = 0
-            for mrk in target_mrks:
-                segment_counter += 1
-                mid = mrk.get('mid')
-                
-                # Check if we have translation for this segment
-                if segment_counter in segment_map[unit_id]:
-                    translation_data = segment_map[unit_id][segment_counter]
-                    
-                    # Clear existing content in mrk
-                    mrk.clear()
-                    mrk.set('mtype', 'seg')
-                    if mid:
-                        mrk.set('mid', mid)
-                    
-                    # Add new translation content
-                    target_content = translation_data['target_content']
-                    if target_content:
-                        if isinstance(target_content[0], str):
-                            mrk.text = target_content[0]
-                            target_content = target_content[1:]
-                        
-                        for item in target_content:
-                            if isinstance(item, str):
-                                if len(mrk):
-                                    mrk[-1].tail = (mrk[-1].tail or '') + item
-                                else:
-                                    mrk.text = (mrk.text or '') + item
-                            else:
-                                mrk.append(item)
-                    
-                    # Update status in seg-defs if available
-                    if seg_defs is not None and mid:
-                        seg_def = seg_defs.find(f'sdl:seg[@id="{mid}"]', NS_XLIFF12)
-                        if seg_def is not None:
-                            new_status = map_xliff22_state_to_sdl(translation_data['state'])
-                            seg_def.set('conf', new_status)
-                    
-                    updated_count += 1
+            # Positional lookup is only a fallback for XLIFF 2.2 files produced
+            # before segments carried sdl-mid.
+            by_position = dict(enumerate(target_mrks, start=1))
+            written = []
+
+            for position in sorted(segment_map[unit_id]):
+                translation_data = segment_map[unit_id][position]
+                mid = translation_data.get('mid')
+
+                if mid is not None:
+                    mrk = mrk_by_mid.get(mid)
                 else:
+                    mrk = by_position.get(position)
+
+                if mrk is None:
                     skipped_count += 1
+                    continue
+
+                write_mrk_content(mrk, translation_data['target_content'])
+                written.append(mrk)
+
+                # Update status in seg-defs if available
+                mrk_mid = mrk.get('mid')
+                if seg_defs is not None and mrk_mid:
+                    seg_def = seg_defs.find(f'sdl:seg[@id="{mrk_mid}"]', NS_XLIFF12)
+                    if seg_def is not None:
+                        new_status = map_xliff22_state_to_sdl(translation_data['state'])
+                        seg_def.set('conf', new_status)
+
+                updated_count += 1
+
+            skipped_count += sum(
+                1 for mrk in target_mrks if not any(w is mrk for w in written)
+            )
         else:
             # No segmented structure, update simple target
             if 1 in segment_map[unit_id]:
                 translation_data = segment_map[unit_id][1]
-                
+
                 # Clear and rebuild target
+                attribs = dict(target.attrib)
                 target.clear()
+                target.attrib.update(attribs)
                 target_content = translation_data['target_content']
-                
+
                 if target_content:
                     if isinstance(target_content[0], str):
                         target.text = target_content[0]
                         target_content = target_content[1:]
-                    
+
                     for item in target_content:
                         if isinstance(item, str):
                             if len(target):
@@ -246,14 +334,15 @@ def update_sdlxliff_targets(sdlxliff_path, segment_map, output_path):
                                 target.text = (target.text or '') + item
                         else:
                             target.append(item)
-                
+
                 updated_count += 1
+                skipped_count += len(segment_map[unit_id]) - 1
             else:
                 skipped_count += 1
-    
+
     # Write output WITHOUT pretty printing
     tree.write(output_path, encoding='utf-8', xml_declaration=True, pretty_print=False)
-    
+
     return updated_count, skipped_count
 
 

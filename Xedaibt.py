@@ -736,12 +736,13 @@ class XLIFFLoadThread(QThread):
             total = len(units)
             
             for idx, unit in enumerate(units):
-                segment = unit.find('segment')
-                if segment:
-                    # Find which file this unit belongs to
-                    file_element = unit.find_parent('file')
-                    file_id = file_element.get('id', 'unknown') if file_element else 'unknown'
-                    
+                # Find which file this unit belongs to
+                file_element = unit.find_parent('file')
+                file_id = file_element.get('id', 'unknown') if file_element else 'unknown'
+
+                # A unit can hold several segments (e.g. an SDLXLIFF trans-unit
+                # split into sentences) - every one of them gets its own row.
+                for segment in unit.find_all('segment', recursive=False):
                     src_node = segment.find('source')
                     tgt_node = segment.find('target')
                     
