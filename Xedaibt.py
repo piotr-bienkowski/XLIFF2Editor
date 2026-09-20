@@ -59,6 +59,82 @@ if str(MODULE_DIR) not in sys.path:
 
 # --- Custom Editor Widget for Tag Protection ---
 
+# Target languages offered by the Set Target Language dialog: the 24 official
+# EU languages, the rest of Europe, the regional variants localisation work
+# actually asks for, and en-US.
+EUROPEAN_LANGUAGES = [
+    ('sq-AL', 'Albanian (Albania)'),
+    ('eu-ES', 'Basque (Spain)'),
+    ('be-BY', 'Belarusian (Belarus)'),
+    ('bs-BA', 'Bosnian (Bosnia and Herzegovina)'),
+    ('bg-BG', 'Bulgarian (Bulgaria)'),
+    ('ca-ES', 'Catalan (Spain)'),
+    ('hr-HR', 'Croatian (Croatia)'),
+    ('cs-CZ', 'Czech (Czechia)'),
+    ('da-DK', 'Danish (Denmark)'),
+    ('nl-BE', 'Dutch (Belgium - Flemish)'),
+    ('nl-NL', 'Dutch (Netherlands)'),
+    ('en-IE', 'English (Ireland)'),
+    ('en-GB', 'English (United Kingdom)'),
+    ('en-US', 'English (United States)'),
+    ('et-EE', 'Estonian (Estonia)'),
+    ('fi-FI', 'Finnish (Finland)'),
+    ('fr-BE', 'French (Belgium)'),
+    ('fr-CA', 'French (Canada)'),
+    ('fr-FR', 'French (France)'),
+    ('fr-CH', 'French (Switzerland)'),
+    ('gl-ES', 'Galician (Spain)'),
+    ('de-AT', 'German (Austria)'),
+    ('de-DE', 'German (Germany)'),
+    ('de-CH', 'German (Switzerland)'),
+    ('el-GR', 'Greek (Greece)'),
+    ('hu-HU', 'Hungarian (Hungary)'),
+    ('is-IS', 'Icelandic (Iceland)'),
+    ('ga-IE', 'Irish (Ireland)'),
+    ('it-IT', 'Italian (Italy)'),
+    ('it-CH', 'Italian (Switzerland)'),
+    ('lv-LV', 'Latvian (Latvia)'),
+    ('lt-LT', 'Lithuanian (Lithuania)'),
+    ('lb-LU', 'Luxembourgish (Luxembourg)'),
+    ('mk-MK', 'Macedonian (North Macedonia)'),
+    ('mt-MT', 'Maltese (Malta)'),
+    ('nb-NO', 'Norwegian Bokmal (Norway)'),
+    ('nn-NO', 'Norwegian Nynorsk (Norway)'),
+    ('pl-PL', 'Polish (Poland)'),
+    ('pt-PT', 'Portuguese (Portugal)'),
+    ('ro-RO', 'Romanian (Romania)'),
+    ('ru-RU', 'Russian (Russia)'),
+    ('sr-RS', 'Serbian (Serbia - Cyrillic)'),
+    ('sr-Latn-RS', 'Serbian (Serbia - Latin)'),
+    ('sk-SK', 'Slovak (Slovakia)'),
+    ('sl-SI', 'Slovenian (Slovenia)'),
+    ('es-ES', 'Spanish (Spain)'),
+    ('sv-SE', 'Swedish (Sweden)'),
+    ('tr-TR', 'Turkish (Turkiye)'),
+    ('uk-UA', 'Ukrainian (Ukraine)'),
+    ('cy-GB', 'Welsh (United Kingdom)'),
+]
+
+
+# Pre-selected when the file carries no target language yet.
+DEFAULT_TARGET_LANGUAGE = 'pl-PL'
+
+
+def language_choices(current=None):
+    """Dialog entries as 'code - Name', with any current code kept selectable.
+
+    Returns (entries, index) so a code already on the file stays chosen even
+    when it is not a European one.
+    """
+    entries = [f'{code} \u2014 {name}' for code, name in EUROPEAN_LANGUAGES]
+    wanted = (current or DEFAULT_TARGET_LANGUAGE).strip().lower()
+    for idx, (code, _name) in enumerate(EUROPEAN_LANGUAGES):
+        if code.lower() == wanted:
+            return entries, idx
+
+    return [f'{current.strip()} \u2014 (current)'] + entries, 0
+
+
 # When only the bare language is known and several regional dictionaries are
 # installed, prefer these. Everything else is resolved against what Enchant
 # actually has, rather than guessed.
@@ -2396,41 +2472,25 @@ class XLIFFEditor(QMainWindow):
         if not self.xliff_soup:
             QMessageBox.warning(self, "No File", "Please open an XLIFF file first.")
             return
-        
-        # Common language codes for suggestions
-        common_langs = [
-            "pl-PL (Polish - Poland)",
-            "de-DE (German - Germany)",
-            "fr-FR (French - France)",
-            "es-ES (Spanish - Spain)",
-            "it-IT (Italian - Italy)",
-            "pt-BR (Portuguese - Brazil)",
-            "ja-JP (Japanese - Japan)",
-            "zh-CN (Chinese - China)",
-            "ru-RU (Russian - Russia)",
-            "ar-SA (Arabic - Saudi Arabia)",
-        ]
-        
+
+        entries, current_index = language_choices(self.trg_lang)
+
         current_info = f"Current source language: {self.src_lang}\n"
         current_info += f"Current target language: {self.trg_lang if self.trg_lang else 'Not set'}\n\n"
-        current_info += "Enter target language code (e.g., pl-PL, de-DE, fr-FR):"
-        
-        lang_code, ok = QInputDialog.getText(
-            self, 
+        current_info += "Choose the target language:"
+
+        choice, ok = QInputDialog.getItem(
+            self,
             "Set Target Language",
             current_info,
-            text=self.trg_lang if self.trg_lang else ""
+            entries,
+            current_index,
+            False,          # pick from the list; no free-typed locales
         )
-        
-        if ok and lang_code.strip():
-            lang_code = lang_code.strip()
-            
-            # Basic validation - should be in format xx-XX or just xx
-            if not (2 <= len(lang_code) <= 10):
-                QMessageBox.warning(self, "Invalid Format", 
-                                  "Language code should be 2-10 characters (e.g., pl-PL, en-US)")
-                return
-            
+
+        if ok and choice:
+            lang_code = choice.split()[0]
+
             # Update the XLIFF root element
             xliff_root = self.xliff_soup.find('xliff')
             if xliff_root:
