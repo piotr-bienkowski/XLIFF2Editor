@@ -1411,6 +1411,8 @@ class XLIFFEditor(QMainWindow):
             ("Clear Current Target", "Ctrl+D", self.clear_current_target),
             ("Clear All Targets", "Ctrl+Shift+D", self.clear_all_targets),
             ("Set Status to Translated", "Ctrl+E", self.set_current_translated),
+            ("Next Segment", "Ctrl+.", self.goto_next_segment),
+            ("Previous Segment", "Ctrl+,", self.goto_previous_segment),
             (None, None, None),
             ("Copy Source to Target", "Alt+S", self.copy_source_to_target),
             ("Copy All Sources to Targets", "Ctrl+Shift+C", self.copy_all_sources_to_targets),
@@ -3341,9 +3343,46 @@ class XLIFFEditor(QMainWindow):
         )
 
     def set_current_translated(self):
+        """Confirm the current segment and open the next one."""
         if self.current_row >= 0:
             self.table.item(self.current_row, 4).setText("translated")  # Column 4 is now Status
             self.segments[self.current_row]['state'] = "translated"
+            if not self.goto_next_segment():
+                self.statusBar().showMessage("Last segment confirmed.", 3000)
+
+    def _visible_neighbour(self, start, step):
+        """Row `step` places away from `start`, skipping rows the filter hides."""
+        row = start + step
+        while 0 <= row < self.table.rowCount():
+            if not self.table.isRowHidden(row):
+                return row
+            row += step
+        return -1
+
+    def _goto_row(self, row):
+        """Select a row's target cell; the CurrentChanged trigger opens it."""
+        if row < 0:
+            return False
+        self.table.setCurrentCell(row, 3)
+        item = self.table.item(row, 3)
+        if item is not None:
+            self.table.scrollToItem(
+                item, QAbstractItemView.ScrollHint.EnsureVisible
+            )
+        return True
+
+    def goto_next_segment(self):
+        """Move to the next segment without touching its status."""
+        if not self.segments:
+            return False
+        return self._goto_row(self._visible_neighbour(self.current_row, 1))
+
+    def goto_previous_segment(self):
+        """Move to the previous segment without touching its status."""
+        if not self.segments:
+            return False
+        start = self.current_row if self.current_row >= 0 else self.table.rowCount()
+        return self._goto_row(self._visible_neighbour(start, -1))
 
     def hybridtm_batch_review(self):
         """Review existing translations against a HybridTM instance plus an LLM."""
