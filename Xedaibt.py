@@ -59,6 +59,64 @@ if str(MODULE_DIR) not in sys.path:
 
 # --- Custom Editor Widget for Tag Protection ---
 
+# When only the bare language is known and several regional dictionaries are
+# installed, prefer these. Everything else is resolved against what Enchant
+# actually has, rather than guessed.
+SPELL_LANG_DEFAULTS = {
+    'en': 'en_US',
+    'pt': 'pt_BR',
+    'zh': 'zh_CN',
+}
+
+
+def _dict_parts(name):
+    """Split an Enchant dictionary name into (base, region, is_variant)."""
+    head = name.split('-')[0]
+    bits = head.split('_')
+    return bits[0].lower(), (bits[1].upper() if len(bits) > 1 else None), '-' in name
+
+
+def resolve_enchant_language(language_code, available):
+    """Pick the best installed dictionary for an XLIFF language code.
+
+    'pl-PL' and 'pl_pl' both find pl_PL; 'de' finds de_DE when that is what is
+    installed; 'pt-PT' falls back to another Portuguese dictionary rather than
+    to nothing. Returns None when no dictionary shares the language, instead of
+    inventing a locale such as nl_US.
+    """
+    normalized = ((language_code or '').strip() or 'en').replace('-', '_')
+    parts = [p for p in normalized.split('_') if p]
+    if not parts:
+        return None
+
+    base = parts[0].lower()
+    region = parts[1].upper() if len(parts) > 1 else None
+
+    installed = list(available)
+    by_name = {name.lower(): name for name in installed}
+
+    # An exact locale wins, whatever case the XLIFF used.
+    if region and f'{base}_{region}'.lower() in by_name:
+        return by_name[f'{base}_{region}'.lower()]
+
+    same_language = [n for n in installed if _dict_parts(n)[0] == base]
+    if not same_language:
+        return None
+
+    # Plain dictionaries before spelling variants (en_GB before en_GB-ise).
+    pool = [n for n in same_language if not _dict_parts(n)[2]] or same_language
+
+    preferred = SPELL_LANG_DEFAULTS.get(base)
+    if preferred in pool:
+        return preferred
+
+    for name in pool:
+        if _dict_parts(name)[1] is None:      # a bare 'pl'-style dictionary
+            return name
+
+    return sorted(pool)[0]
+
+
 class TagProtectedTextEdit(QPlainTextEdit):
     """Custom text editor that makes tag regions non-editable"""
 
@@ -269,43 +327,25 @@ class TagProtectedTextEdit(QPlainTextEdit):
         self.viewport().update()  # Trigger repaint
 
     def set_spell_checker_language(self, language_code):
-        """Set the spell checker language based on language code (e.g., 'pl-PL', 'en-US')"""
+        """Set the spell checker language from a code such as 'pl-PL' or 'nl'."""
         if not self.spell_check_enabled:
             return
 
         try:
-            # Extract base language code (pl from pl-PL, en from en-US)
-            if language_code and '-' in language_code:
-                lang = language_code.split('-')[0].lower()
-            else:
-                lang = language_code.lower() if language_code else 'en'
+            enchant_lang = resolve_enchant_language(
+                language_code, enchant.list_languages()
+            )
 
-            # Map common language codes
-            lang_map = {
-                'pl': 'pl_PL',
-                'en': 'en_US',
-                'de': 'de_DE',
-                'fr': 'fr_FR',
-                'es': 'es_ES',
-                'it': 'it_IT',
-                'pt': 'pt_BR',
-                'ru': 'ru_RU',
-            }
-
-            enchant_lang = lang_map.get(lang, f'{lang}_US')
-
-            # Check if dictionary is available
-            if enchant.dict_exists(enchant_lang):
+            if enchant_lang:
                 self.spell_checker = enchant.Dict(enchant_lang)
                 self.check_spelling()
             else:
-                # Try simpler language code
-                if enchant.dict_exists(lang):
-                    self.spell_checker = enchant.Dict(lang)
-                    self.check_spelling()
-                else:
-                    print(f"Warning: Dictionary for '{enchant_lang}' not available. Available: {enchant.list_languages()}")
-                    self.spell_checker = None
+                print(
+                    f"Warning: no spell-check dictionary installed for "
+                    f"'{language_code}'. Spell checking is off for this "
+                    f"language. Installed: {enchant.list_languages()}"
+                )
+                self.spell_checker = None
         except Exception as e:
             print(f"Error setting spell checker language: {e}")
             self.spell_checker = None
